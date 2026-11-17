@@ -1,8 +1,7 @@
-import { useState } from 'react';
-import { Check, Cloud, Download, LogIn, LogOut, X } from 'lucide-react';
+import { Check, Cloud, Download, LogIn, LogOut, Share, Smartphone, X } from 'lucide-react';
 import type { User } from 'firebase/auth';
-import { usePWAInstall } from '../hooks/usePWAInstall';
 import type { TranslationCode } from '../services/scriptureApi';
+import { usePWAInstall } from '../hooks/usePWAInstall';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -45,7 +44,6 @@ export function SettingsModal({
   onSignOut,
 }: SettingsModalProps) {
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
-  const [showIOSGuide, setShowIOSGuide] = useState(false);
 
   if (!isOpen) return null;
 
@@ -62,9 +60,9 @@ export function SettingsModal({
         aria-hidden="true"
       />
 
-      <div className="relative z-10 w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl bg-[#161B19] border border-[#D4AF37]/20 shadow-2xl overflow-hidden">
+      <div className="relative z-10 w-full sm:max-w-md max-h-[88dvh] flex flex-col rounded-t-3xl sm:rounded-2xl bg-[#161B19] border border-[#D4AF37]/20 shadow-2xl overflow-hidden">
         {/* Header */}
-        <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between">
+        <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between shrink-0">
           <h2 className="text-base font-semibold text-[#F5F2EA]">Settings</h2>
           <button
             type="button"
@@ -76,7 +74,7 @@ export function SettingsModal({
           </button>
         </div>
 
-        <div className="p-5 space-y-6">
+        <div className="p-5 space-y-6 overflow-y-auto overscroll-contain">
           {/* Translation Selector */}
           <section className="space-y-3">
             <div>
@@ -197,48 +195,45 @@ export function SettingsModal({
             )}
           </section>
 
-          {/* In-App PWA Install */}
           {!isInstalled && (isInstallable || isIOS) && (
             <>
               <div className="h-px bg-white/10" aria-hidden="true" />
-              <section className="space-y-2.5">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <h3 className="text-xs font-semibold tracking-wide text-[#D4AF37]">
-                      Install BibleScroll
-                    </h3>
-                    <p className="text-xs text-[#9CA8A2] mt-0.5">
-                      Launch full-screen directly from your home screen.
-                    </p>
-                  </div>
 
-                  {isInstallable ? (
-                    <button
-                      type="button"
-                      onClick={() => void install()}
-                      className="min-h-[44px] px-3.5 rounded-xl bg-[#D4AF37]/15 border border-[#D4AF37]/40 text-xs font-semibold text-[#D4AF37] hover:bg-[#D4AF37]/25 flex items-center gap-2 whitespace-nowrap shrink-0 transition-colors"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      <span>Install</span>
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => setShowIOSGuide((v) => !v)}
-                      className="min-h-[44px] px-3.5 rounded-xl bg-[#D4AF37]/15 border border-[#D4AF37]/40 text-xs font-semibold text-[#D4AF37] hover:bg-[#D4AF37]/25 flex items-center gap-2 whitespace-nowrap shrink-0 transition-colors"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      <span>How to Install</span>
-                    </button>
-                  )}
+              {/* Install App */}
+              <section className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <Smartphone className="w-4 h-4 text-[#D4AF37]" aria-hidden="true" />
+                  <h3 className="text-xs font-semibold tracking-wide text-[#D4AF37]">
+                    Install App
+                  </h3>
                 </div>
 
-                {showIOSGuide && isIOS && !isInstallable && (
-                  <p className="rounded-xl bg-[#0F1312] border border-white/10 p-3 text-xs text-[#9CA8A2] leading-relaxed">
-                    Tap <strong className="text-[#F5F2EA]">Share</strong> in Safari, then choose{' '}
-                    <strong className="text-[#F5F2EA]">Add to Home Screen</strong>.
-                  </p>
-                )}
+                <div className="rounded-xl bg-[#0F1312] border border-white/10 p-4 space-y-3">
+                  {isInstallable ? (
+                    <>
+                      <p className="text-xs text-[#9CA8A2] leading-relaxed">
+                        Install BibleScroll on your home screen for a full-screen standalone
+                        reading experience.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={install}
+                        className="w-full min-h-[44px] px-4 py-2.5 rounded-xl border border-[#D4AF37]/50 bg-[#D4AF37]/12 text-[#F5F2EA] text-sm font-semibold hover:bg-[#D4AF37]/20 flex items-center justify-center gap-2 transition-colors"
+                      >
+                        <Download className="w-4 h-4 text-[#D4AF37]" />
+                        <span>Install BibleScroll</span>
+                      </button>
+                    </>
+                  ) : (
+                    <div className="flex items-start gap-2.5 text-xs text-[#9CA8A2] leading-relaxed">
+                      <Share className="w-4 h-4 text-[#D4AF37] shrink-0 mt-0.5" aria-hidden="true" />
+                      <p>
+                        To install on iPhone or iPad, tap <strong className="text-[#F5F2EA]">Share</strong> in
+                        Safari and choose <strong className="text-[#F5F2EA]">Add to Home Screen</strong>.
+                      </p>
+                    </div>
+                  )}
+                </div>
               </section>
             </>
           )}

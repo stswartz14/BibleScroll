@@ -5,7 +5,7 @@
   "description": "Mobile-first vertical snap-scrolling Bible reader featuring BSB and WEB translations, a 66-book wave scrubber, and cross-device bookmark syncing.",
   "start_url": "./",
   "scope": "./",
-  "display": "standalone",
+  "display": "fullscreen",
   "orientation": "portrait",
   "background_color": "#07271E",
   "theme_color": "#07271E",

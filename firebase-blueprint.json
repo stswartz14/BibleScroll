@@ -1,0 +1,145 @@
+{
+  "entities": {
+    "UserReadingState": {
+      "title": "UserReadingState",
+      "description": "Stores a signed-in user's preferred scripture translation and last-read chapter and verse position.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "translation": {
+          "type": "string",
+          "description": "Selected Bible translation code.",
+          "enum": ["BSB", "WEB"]
+        },
+        "bookId": {
+          "type": "string",
+          "description": "USFM 3-character uppercase book identifier.",
+          "minLength": 3,
+          "maxLength": 3,
+          "pattern": "^[A-Z0-9]{3}$"
+        },
+        "bookName": {
+          "type": "string",
+          "description": "Display name of the Bible book.",
+          "minLength": 2,
+          "maxLength": 40
+        },
+        "chapter": {
+          "type": "integer",
+          "description": "Current chapter number (1-150)."
+        },
+        "verse": {
+          "type": "integer",
+          "description": "Current verse number (1-176)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when user profile was initialized."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the latest reading state update."
+        }
+      },
+      "required": ["uid", "translation", "bookId", "bookName", "chapter", "verse", "createdAt", "updatedAt"]
+    },
+    "SavedVerse": {
+      "title": "SavedVerse",
+      "description": "A liked or bookmarked verbatim scripture verse saved by a user.",
+      "type": "object",
+      "properties": {
+        "verseKey": {
+          "type": "string",
+          "description": "Canonical deterministic key in USFM_CHAPTER_VERSE format (e.g. GEN_1_1).",
+          "minLength": 5,
+          "maxLength": 15,
+          "pattern": "^[A-Z0-9]{3}_[0-9]{1,3}_[0-9]{1,3}$"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "bookId": {
+          "type": "string",
+          "description": "USFM 3-character book identifier.",
+          "minLength": 3,
+          "maxLength": 3,
+          "pattern": "^[A-Z0-9]{3}$"
+        },
+        "bookName": {
+          "type": "string",
+          "description": "Full book name.",
+          "minLength": 2,
+          "maxLength": 40
+        },
+        "chapter": {
+          "type": "integer",
+          "description": "Chapter number."
+        },
+        "verse": {
+          "type": "integer",
+          "description": "Verse number."
+        },
+        "reference": {
+          "type": "string",
+          "description": "Human-readable verse reference (e.g. Genesis 1:1).",
+          "minLength": 3,
+          "maxLength": 60
+        },
+        "text": {
+          "type": "string",
+          "description": "Verbatim verse text from the API.",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "translation": {
+          "type": "string",
+          "description": "Source translation of the saved verse.",
+          "enum": ["BSB", "WEB"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the verse was liked or bookmarked."
+        }
+      },
+      "required": [
+        "verseKey",
+        "ownerId",
+        "bookId",
+        "bookName",
+        "chapter",
+        "verse",
+        "reference",
+        "text",
+        "translation",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserReadingState" },
+      "description": "User reading progress and preferred translation document."
+    },
+    "/users/{userId}/likes/{verseKey}": {
+      "schema": { "$ref": "#/entities/SavedVerse" },
+      "description": "Verses liked by the user."
+    },
+    "/users/{userId}/bookmarks/{verseKey}": {
+      "schema": { "$ref": "#/entities/SavedVerse" },
+      "description": "Verses bookmarked by the user."
+    }
+  }
+}

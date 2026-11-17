@@ -1,0 +1,72 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@property --bg-top {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #07271e;
+}
+
+@property --bg-mid {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #0a1f19;
+}
+
+@property --bg-bottom {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #121514;
+}
+
+@layer base {
+  :root {
+    --font-serif: 'Cormorant Garamond', Georgia, Cambria, 'Times New Roman', serif;
+    --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    background-color: #07271e;
+    color: #f5f2ea;
+    font-family: var(--font-sans);
+    overscroll-behavior-y: none;
+  }
+}
+
+.book-theme-bg {
+  background-color: var(--bg-top);
+  background-image: linear-gradient(180deg, var(--bg-top) 0%, var(--bg-mid) 48%, var(--bg-bottom) 100%);
+  transition:
+    --bg-top 700ms ease,
+    --bg-mid 700ms ease,
+    --bg-bottom 700ms ease,
+    background-color 700ms ease;
+}
+
+.font-scripture {
+  font-family: var(--font-serif);
+}
+
+.font-ui {
+  font-family: var(--font-sans);
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}

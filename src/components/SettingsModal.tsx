@@ -1,4 +1,4 @@
-import { Check, Cloud, Download, LogIn, LogOut, Share, Smartphone, X } from 'lucide-react';
+import { Check, Cloud, Download, Layers, LogIn, LogOut, Share, Smartphone, X } from 'lucide-react';
 import type { User } from 'firebase/auth';
 import type { TranslationCode } from '../services/scriptureApi';
 import { usePWAInstall } from '../hooks/usePWAInstall';
@@ -6,11 +6,13 @@ import { usePWAInstall } from '../hooks/usePWAInstall';
 interface SettingsModalProps {
   isOpen: boolean;
   translation: TranslationCode;
+  smartGrouping: boolean;
   user: User | null;
   authLoading: boolean;
   authError: string | null;
   onClose: () => void;
   onChangeTranslation: (next: TranslationCode) => void;
+  onToggleSmartGrouping: () => void;
   onSignIn: () => void;
   onSignOut: () => void;
 }
@@ -35,11 +37,13 @@ const TRANSLATIONS: Array<{
 export function SettingsModal({
   isOpen,
   translation,
+  smartGrouping,
   user,
   authLoading,
   authError,
   onClose,
   onChangeTranslation,
+  onToggleSmartGrouping,
   onSignIn,
   onSignOut,
 }: SettingsModalProps) {
@@ -121,6 +125,52 @@ export function SettingsModal({
                 );
               })}
             </div>
+          </section>
+
+          <div className="h-px bg-white/10" aria-hidden="true" />
+
+          {/* Reading Experience: Smart Verse Grouping */}
+          <section className="space-y-3">
+            <div className="flex items-center gap-2">
+              <Layers className="w-4 h-4 text-[#D4AF37]" aria-hidden="true" />
+              <h3 className="text-xs font-semibold tracking-wide text-[#D4AF37]">
+                Reading Flow
+              </h3>
+            </div>
+
+            <button
+              type="button"
+              role="switch"
+              aria-checked={smartGrouping}
+              onClick={onToggleSmartGrouping}
+              className="w-full min-h-[56px] px-4 py-3 rounded-xl bg-[#0F1312] border border-white/10 hover:border-white/25 text-left flex items-center justify-between gap-4 transition-colors"
+            >
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-[#F5F2EA]">Smart Verse Grouping</p>
+                <p className="text-xs text-[#9CA8A2] mt-0.5 leading-relaxed">
+                  {smartGrouping
+                    ? 'Keeps complete thoughts together in cohesive reels while respecting section headings.'
+                    : 'Displays one individual verse per full-screen card.'}
+                </p>
+              </div>
+
+              <span
+                aria-hidden="true"
+                className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border transition-colors ${
+                  smartGrouping
+                    ? 'bg-[#D4AF37] border-[#D4AF37]'
+                    : 'bg-white/10 border-white/15'
+                }`}
+              >
+                <span
+                  className={`inline-block h-4 w-4 rounded-full transition-transform ${
+                    smartGrouping
+                      ? 'translate-x-6 bg-[#121514]'
+                      : 'translate-x-1 bg-[#F5F2EA]/80'
+                  }`}
+                />
+              </span>
+            </button>
           </section>
 
           <div className="h-px bg-white/10" aria-hidden="true" />

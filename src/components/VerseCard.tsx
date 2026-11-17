@@ -1,17 +1,30 @@
-import { useEffect, useRef, useState } from 'react';
-import { ArrowRight, Bookmark, Check, Copy, Heart, Share2 } from 'lucide-react';
-import type { TranslationCode, VerseItem } from '../services/scriptureApi';
+import { Fragment, useEffect, useRef, useState } from 'react';
+import {
+  ArrowRight,
+  Bookmark,
+  Check,
+  CheckCircle2,
+  Copy,
+  Heart,
+  NotebookPen,
+  Share2,
+} from 'lucide-react';
+import type { TranslationCode, VerseCardItem } from '../services/scriptureApi';
 
 interface VerseCardProps {
-  verse: VerseItem;
+  card: VerseCardItem;
+  cardIndex: number;
   isLiked: boolean;
   isBookmarked: boolean;
-  isLastVerseInChapter: boolean;
+  hasNote: boolean;
+  isRead: boolean;
+  isLastCardInChapter: boolean;
   nextChapterLabel: string | null;
-  onToggleLike: (verse: VerseItem) => void;
-  onToggleBookmark: (verse: VerseItem) => void;
-  onShare: (verse: VerseItem) => void;
-  onCopy: (verse: VerseItem) => void;
+  onToggleLike: (card: VerseCardItem) => void;
+  onToggleBookmark: (card: VerseCardItem) => void;
+  onOpenNote: (card: VerseCardItem) => void;
+  onShare: (card: VerseCardItem) => void;
+  onCopy: (card: VerseCardItem) => void;
   onNextChapter: () => void;
   isCopied: boolean;
 }
@@ -51,13 +64,17 @@ function getVerseTypographyClass(text: string): string {
 }
 
 export function VerseCard({
-  verse,
+  card,
+  cardIndex,
   isLiked,
   isBookmarked,
-  isLastVerseInChapter,
+  hasNote,
+  isRead,
+  isLastCardInChapter,
   nextChapterLabel,
   onToggleLike,
   onToggleBookmark,
+  onOpenNote,
   onShare,
   onCopy,
   onNextChapter,
@@ -73,16 +90,25 @@ export function VerseCard({
     const el = textBoxRef.current;
     if (!el) return;
 
+    let cancelled = false;
     const checkScroll = () => {
-      const overflows = el.scrollHeight > el.clientHeight + 4;
+      if (cancelled) return;
+      const overflows = el.scrollHeight > el.clientHeight + 6;
       setHasOverflow(overflows);
       setIsAtBottom(el.scrollTop + el.clientHeight >= el.scrollHeight - 8);
     };
 
     checkScroll();
     window.addEventListener('resize', checkScroll);
-    return () => window.removeEventListener('resize', checkScroll);
-  }, [verse.text]);
+    if (document.fonts?.ready) {
+      void document.fonts.ready.then(checkScroll);
+    }
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener('resize', checkScroll);
+    };
+  }, [card.combinedText]);
 
   const handleInnerScroll = () => {
     const el = textBoxRef.current;
@@ -90,37 +116,56 @@ export function VerseCard({
     setIsAtBottom(el.scrollTop + el.clientHeight >= el.scrollHeight - 8);
   };
 
-  const typographyClass = getVerseTypographyClass(verse.text);
-  const translationInfo = TRANSLATION_DETAILS[verse.translation];
+  const typographyClass = getVerseTypographyClass(card.combinedText);
+  const translationInfo = TRANSLATION_DETAILS[card.translation];
 
   return (
     <article
-      data-verse={verse.verse}
-      className="h-[100dvh] w-full shrink-0 snap-start snap-always relative flex flex-col justify-between pt-[calc(env(safe-area-inset-top,0px)+64px)] pb-12 pl-9 pr-14 sm:px-16 md:px-20 overflow-hidden"
+      data-card-index={cardIndex}
+      data-start-verse={card.startVerse}
+      data-end-verse={card.endVerse}
+      className="h-[100dvh] w-full shrink-0 snap-start snap-always relative flex flex-col justify-between pt-[calc(env(safe-area-inset-top,0px)+64px)] pb-12 pl-9 pr-14 sm:px-16 md:px-20 overflow-hidden touch-pan-y"
     >
       {/* Centered editorial scripture column */}
       <div className="relative z-10 max-w-2xl w-full mx-auto flex-1 flex flex-col justify-center min-h-0">
+        {card.heading && (
+          <h2 className="pb-2.5 text-xs sm:text-sm font-medium tracking-wide text-[#D4AF37]/90">
+            {card.heading}
+          </h2>
+        )}
+
         {/* Upper gold hairline divider */}
         <div
           aria-hidden="true"
           className="h-px w-full bg-gradient-to-r from-[#D4AF37]/50 via-[#D4AF37]/30 to-transparent shrink-0"
         />
 
-        {/* Scroll-safe verse body supporting poetry line breaks & long verses (e.g. Esther 8:9) */}
+        {/* Scroll-safe verse body supporting poetry line breaks, grouped inline superscripts & long verses */}
         <div
           ref={textBoxRef}
           onScroll={handleInnerScroll}
-          className={`relative max-h-[52dvh] overflow-y-auto overscroll-contain no-scrollbar py-5 sm:py-7 ${
-            hasOverflow ? 'pr-1' : ''
+          data-verse-scrollable={hasOverflow ? 'true' : undefined}
+          className={`relative max-h-[52dvh] no-scrollbar py-5 sm:py-7 ${
+            hasOverflow ? 'overflow-y-auto overscroll-y-auto pr-1' : 'overflow-hidden'
           }`}
         >
           <p
             className={`font-scripture font-normal tracking-[0.01em] text-[#F5F2EA] whitespace-pre-line ${typographyClass}`}
           >
-            <sup className="font-ui text-[0.46em] font-semibold text-[#D4AF37] mr-2 align-super tabular-nums select-none">
-              {verse.verse}
-            </sup>
-            {verse.text}
+            {card.verses.map((v, idx) => {
+              const prevText = idx > 0 ? card.verses[idx - 1].text : '';
+              const sep =
+                idx === 0 ? '' : prevText.includes('\n') || v.text.includes('\n') ? '\n' : ' ';
+              return (
+                <Fragment key={v.verse}>
+                  {sep}
+                  <sup className="font-ui text-[0.46em] font-semibold text-[#D4AF37] mr-1.5 align-super tabular-nums select-none">
+                    {v.verse}
+                  </sup>
+                  {v.text}
+                </Fragment>
+              );
+            })}
           </p>
         </div>
 
@@ -136,10 +181,21 @@ export function VerseCard({
           className="h-px w-full bg-gradient-to-r from-[#D4AF37]/50 via-[#D4AF37]/30 to-transparent shrink-0"
         />
 
-        {/* Bottom-left Reference + Interactive Translation Info & One-Thumb Chapter Advance */}
+        {/* Bottom-left Reference + Read Checkmark + Interactive Translation Info & One-Thumb Chapter Advance */}
         <div className="pt-4 flex flex-wrap items-center justify-between gap-3">
           <div className="relative flex items-center gap-2 text-xs sm:text-sm font-medium tracking-wide">
-            <span className="text-[#F5F2EA]/90 tabular-nums">{verse.reference}</span>
+            <span className="text-[#F5F2EA]/90 tabular-nums">{card.reference}</span>
+
+            {isRead && (
+              <span
+                title="Read"
+                aria-label="Marked as read"
+                className="inline-flex items-center text-[#D4AF37]/80"
+              >
+                <CheckCircle2 className="w-3.5 h-3.5" aria-hidden="true" />
+              </span>
+            )}
+
             <span aria-hidden="true" className="text-[#D4AF37]/60">
               ·
             </span>
@@ -166,10 +222,10 @@ export function VerseCard({
               }}
               onPointerCancel={() => setShowTranslationInfo(false)}
               onContextMenu={(e) => e.preventDefault()}
-              aria-label={`${verse.translation}: ${translationInfo.fullName}. Hold or hover for translation details.`}
+              aria-label={`${card.translation}: ${translationInfo.fullName}. Hold or hover for translation details.`}
               className="relative inline-flex items-center px-1.5 py-0.5 -mx-1.5 -my-0.5 rounded-md text-[#D4AF37] font-semibold hover:bg-[#D4AF37]/10 focus-visible:outline focus-visible:outline-1 focus-visible:outline-[#D4AF37] select-none touch-manipulation transition-colors"
             >
-              {verse.translation}
+              {card.translation}
             </button>
 
             {showTranslationInfo && (
@@ -182,7 +238,7 @@ export function VerseCard({
                     {translationInfo.fullName}
                   </span>
                   <span className="text-[11px] font-semibold text-[#D4AF37]">
-                    {verse.translation}
+                    {card.translation}
                   </span>
                 </div>
                 <p className="text-[11px] font-medium text-[#D4AF37]/85 mt-0.5">
@@ -195,7 +251,7 @@ export function VerseCard({
             )}
           </div>
 
-          {isLastVerseInChapter && nextChapterLabel && (
+          {isLastCardInChapter && nextChapterLabel && (
             <button
               type="button"
               onClick={onNextChapter}
@@ -210,13 +266,13 @@ export function VerseCard({
         {/* Action Bar: Like, Bookmark, Share, Copy */}
         <div
           role="toolbar"
-          aria-label={`Actions for ${verse.reference}`}
+          aria-label={`Actions for ${card.reference}`}
           className="pt-3 flex items-center gap-1.5 sm:gap-2"
         >
           <button
             type="button"
-            onClick={() => onToggleLike(verse)}
-            aria-label={isLiked ? `Unlike ${verse.reference}` : `Like ${verse.reference}`}
+            onClick={() => onToggleLike(card)}
+            aria-label={isLiked ? `Unlike ${card.reference}` : `Like ${card.reference}`}
             aria-pressed={isLiked}
             className={`min-h-[44px] min-w-[44px] px-3 rounded-xl flex items-center justify-center gap-2 text-xs font-medium transition-colors active:scale-[0.96] ${
               isLiked
@@ -234,9 +290,9 @@ export function VerseCard({
 
           <button
             type="button"
-            onClick={() => onToggleBookmark(verse)}
+            onClick={() => onToggleBookmark(card)}
             aria-label={
-              isBookmarked ? `Remove bookmark for ${verse.reference}` : `Bookmark ${verse.reference}`
+              isBookmarked ? `Remove bookmark for ${card.reference}` : `Bookmark ${card.reference}`
             }
             aria-pressed={isBookmarked}
             className={`min-h-[44px] min-w-[44px] px-3 rounded-xl flex items-center justify-center gap-2 text-xs font-medium transition-colors active:scale-[0.96] ${
@@ -255,8 +311,8 @@ export function VerseCard({
 
           <button
             type="button"
-            onClick={() => onShare(verse)}
-            aria-label={`Share ${verse.reference}`}
+            onClick={() => onShare(card)}
+            aria-label={`Share ${card.reference}`}
             className="min-h-[44px] min-w-[44px] px-3 rounded-xl flex items-center justify-center gap-2 text-xs font-medium text-[#9CA8A2] hover:text-[#F5F2EA] hover:bg-white/5 border border-transparent transition-colors active:scale-[0.96]"
           >
             <Share2 className="w-[18px] h-[18px]" />
@@ -265,8 +321,8 @@ export function VerseCard({
 
           <button
             type="button"
-            onClick={() => onCopy(verse)}
-            aria-label={`Copy ${verse.reference}`}
+            onClick={() => onCopy(card)}
+            aria-label={`Copy ${card.reference}`}
             className={`min-h-[44px] min-w-[44px] px-3 rounded-xl flex items-center justify-center gap-2 text-xs font-medium transition-colors active:scale-[0.96] ${
               isCopied
                 ? 'bg-[#D4AF37]/15 text-[#D4AF37] border border-[#D4AF37]/35'
@@ -281,6 +337,29 @@ export function VerseCard({
             <span className="hidden sm:inline whitespace-nowrap">
               {isCopied ? 'Copied' : 'Copy'}
             </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onOpenNote(card)}
+            aria-label={
+              hasNote
+                ? `View or edit note or prayer for ${card.reference}`
+                : `Add note or prayer for ${card.reference}`
+            }
+            aria-pressed={hasNote}
+            className={`min-h-[44px] min-w-[44px] px-3 rounded-xl flex items-center justify-center gap-2 text-xs font-medium transition-colors active:scale-[0.96] ${
+              hasNote
+                ? 'bg-[#D4AF37]/15 text-[#D4AF37] border border-[#D4AF37]/35'
+                : 'text-[#9CA8A2] hover:text-[#F5F2EA] hover:bg-white/5 border border-transparent'
+            }`}
+          >
+            <NotebookPen
+              className={`w-[18px] h-[18px] transition-transform duration-150 ${
+                hasNote ? 'text-[#D4AF37] scale-105' : ''
+              }`}
+            />
+            <span className="hidden sm:inline whitespace-nowrap">Notes</span>
           </button>
         </div>
       </div>

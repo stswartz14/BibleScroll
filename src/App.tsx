@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  BarChart3,
   BookOpen,
   Bookmark,
   ChevronDown,
   ChevronUp,
+  Menu,
+  NotebookPen,
   RefreshCw,
   Settings,
   Undo2,
@@ -18,13 +21,16 @@ import {
   makeVerseKey,
   type BibleBook,
 } from './data/bibleBooks';
+import { computeBibleReadStats, makeReadVerseId } from './data/bibleChapterVerseCounts';
 import { getBookSectionTheme } from './data/bookThemes';
 import {
+  buildVerseCards,
   fetchChapter,
   getCachedChapter,
+  prefetchUpcomingChapters,
   type ChapterData,
   type TranslationCode,
-  type VerseItem,
+  type VerseCardItem,
 } from './services/scriptureApi';
 import {
   auth,
@@ -33,25 +39,43 @@ import {
   signOutAccount,
 } from './firebase';
 import {
+  applyReadTodayToStreak,
+  buildVerseNoteRecord,
+  cardToSavedRecord,
+  deleteCloudVerseNote,
   loadGuestBookmarks,
   loadGuestLikes,
+  loadGuestNotes,
   loadGuestReadingState,
+  loadGuestReadVerses,
+  loadGuestStreak,
+  markBookVersesReadInCloud,
   mergeGuestDataIntoFirestore,
+  saveCloudVerseNote,
   saveGuestBookmarks,
   saveGuestLikes,
+  saveGuestNotes,
   saveGuestReadingState,
+  saveGuestReadVerses,
+  saveGuestStreak,
   subscribeUserCloudData,
-  toggleCloudSavedVerse,
+  toggleCloudSavedRecord,
   updateCloudReadingState,
-  verseToSavedRecord,
+  updateCloudStreak,
+  type NoteKind,
   type ReadingState,
   type SavedVerseRecord,
+  type StreakStats,
+  type VerseNoteRecord,
 } from './services/userStore';
 import { VerseCard } from './components/VerseCard';
 import { WaveBookScrubber } from './components/WaveBookScrubber';
 import { BooksDrawer } from './components/BooksDrawer';
 import { BookmarksModal } from './components/BookmarksModal';
+import { NotesModal } from './components/NotesModal';
 import { SettingsModal } from './components/SettingsModal';
+import { StatsModal } from './components/StatsModal';
+import { VerseNoteModal, type VerseNoteTarget } from './components/VerseNoteModal';
 
 export default function App() {
   const [readingState, setReadingState] = useState<ReadingState>(() => loadGuestReadingState());
@@ -59,6 +83,11 @@ export default function App() {
   const [bookmarksMap, setBookmarksMap] = useState<Record<string, SavedVerseRecord>>(() =>
     loadGuestBookmarks(),
   );
+  const [notesMap, setNotesMap] = useState<Record<string, VerseNoteRecord>>(() => loadGuestNotes());
+  const [readVersesMap, setReadVersesMap] = useState<Record<string, boolean>>(() =>
+    loadGuestReadVerses(),
+  );
+  const [streakStats, setStreakStats] = useState<StreakStats>(() => loadGuestStreak());
 
   const [chapterData, setChapterData] = useState<ChapterData | null>(() => {
     const initial = loadGuestReadingState();
@@ -68,17 +97,24 @@ export default function App() {
   const [chapterError, setChapterError] = useState<string | null>(null);
   const [reloadNonce, setReloadNonce] = useState<number>(0);
 
-  const [activeVerseIndex, setActiveVerseIndex] = useState<number>(0);
+  const [activeCardIndex, setActiveCardIndex] = useState<number>(0);
+  const [isMenuOpen, setIsMenuOpen] = useState<boolean>(false);
   const [isBooksOpen, setIsBooksOpen] = useState<boolean>(false);
   const [isBookmarksOpen, setIsBookmarksOpen] = useState<boolean>(false);
+  const [isNotesOpen, setIsNotesOpen] = useState<boolean>(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
+  const [isStatsOpen, setIsStatsOpen] = useState<boolean>(false);
+  const [noteModalTarget, setNoteModalTarget] = useState<VerseNoteTarget | null>(null);
+  const [isDocumentVisible, setIsDocumentVisible] = useState<boolean>(() =>
+    typeof document === 'undefined' ? true : document.visibilityState === 'visible',
+  );
 
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState<boolean>(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [cloudError, setCloudError] = useState<Error | null>(null);
 
-  const [copiedVerseKey, setCopiedVerseKey] = useState<string | null>(null);
+  const [copiedCardId, setCopiedCardId] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [jumpHistory, setJumpHistory] = useState<
     Array<{ bookId: string; bookName: string; chapter: number; verse: number }>
@@ -88,6 +124,29 @@ export default function App() {
   const pendingTargetVerseRef = useRef<number | null>(readingState.verse);
   const readingStateRef = useRef<ReadingState>(readingState);
   readingStateRef.current = readingState;
+  const readVersesMapRef = useRef<Record<string, boolean>>(readVersesMap);
+  readVersesMapRef.current = readVersesMap;
+  const streakStatsRef = useRef<StreakStats>(streakStats);
+  streakStatsRef.current = streakStats;
+
+  const touchGestureRef = useRef<{
+    startX: number;
+    startY: number;
+    lastX: number;
+    lastY: number;
+    startTime: number;
+    lastMoveTime: number;
+    startScrollTop: number;
+    startIndex: number;
+    scrollableTarget: HTMLElement | null;
+    startInnerScrollTop: number;
+  } | null>(null);
+  const boundaryTransitionAtRef = useRef<number>(0);
+  const lastCardSettledAtRef = useRef<number>(0);
+  const wheelBoundaryAccumRef = useRef<{ deltaY: number; lastEventAt: number }>({
+    deltaY: 0,
+    lastEventAt: 0,
+  });
 
   const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
@@ -100,10 +159,18 @@ export default function App() {
   }, [toastMessage]);
 
   useEffect(() => {
-    if (!copiedVerseKey) return;
-    const timer = window.setTimeout(() => setCopiedVerseKey(null), 1800);
+    if (!copiedCardId) return;
+    const timer = window.setTimeout(() => setCopiedCardId(null), 1800);
     return () => window.clearTimeout(timer);
-  }, [copiedVerseKey]);
+  }, [copiedCardId]);
+
+  useEffect(() => {
+    const handleVisibility = () => {
+      setIsDocumentVisible(document.visibilityState === 'visible');
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
+  }, []);
 
   // Surface Firestore errors cleanly through React ErrorBoundary if thrown
   if (cloudError) {
@@ -131,6 +198,9 @@ export default function App() {
       if (!nextUser) {
         setLikesMap(loadGuestLikes());
         setBookmarksMap(loadGuestBookmarks());
+        setNotesMap(loadGuestNotes());
+        setReadVersesMap(loadGuestReadVerses());
+        setStreakStats(loadGuestStreak());
         return;
       }
 
@@ -138,20 +208,30 @@ export default function App() {
         const guestState = readingStateRef.current;
         const guestLikes = loadGuestLikes();
         const guestBookmarks = loadGuestBookmarks();
+        const guestNotes = loadGuestNotes();
+        const guestReadVerses = loadGuestReadVerses();
+        const guestStreak = streakStatsRef.current;
 
-        const resolvedState = await mergeGuestDataIntoFirestore(
-          nextUser.uid,
-          guestState,
-          guestLikes,
-          guestBookmarks,
-        );
+        const { state: resolvedState, streak: resolvedStreak } =
+          await mergeGuestDataIntoFirestore(
+            nextUser.uid,
+            guestState,
+            guestLikes,
+            guestBookmarks,
+            guestNotes,
+            guestReadVerses,
+            guestStreak,
+          );
 
-        // If cloud reading state differs and user hasn't switched mid-session, sync to cloud state
+        setStreakStats(resolvedStreak);
+        saveGuestStreak(resolvedStreak);
+
         if (
           resolvedState.bookId !== guestState.bookId ||
           resolvedState.chapter !== guestState.chapter ||
           resolvedState.verse !== guestState.verse ||
-          resolvedState.translation !== guestState.translation
+          resolvedState.translation !== guestState.translation ||
+          resolvedState.smartGrouping !== guestState.smartGrouping
         ) {
           pendingTargetVerseRef.current = resolvedState.verse;
           setReadingState(resolvedState);
@@ -160,23 +240,34 @@ export default function App() {
 
         unsubCloud = subscribeUserCloudData(nextUser.uid, {
           onReadingState: (cloudState) => {
-            // Only adopt remote changes if different from current local pointer
             const cur = readingStateRef.current;
             if (
               cloudState.bookId !== cur.bookId ||
               cloudState.chapter !== cur.chapter ||
-              cloudState.translation !== cur.translation
+              cloudState.translation !== cur.translation ||
+              cloudState.smartGrouping !== cur.smartGrouping
             ) {
               pendingTargetVerseRef.current = cloudState.verse;
               setReadingState(cloudState);
               saveGuestReadingState(cloudState);
             }
           },
+          onStreak: (cloudStreak) => {
+            setStreakStats(cloudStreak);
+            saveGuestStreak(cloudStreak);
+          },
           onLikes: (cloudLikes) => {
             setLikesMap(cloudLikes);
           },
           onBookmarks: (cloudBookmarks) => {
             setBookmarksMap(cloudBookmarks);
+          },
+          onNotes: (cloudNotes) => {
+            setNotesMap(cloudNotes);
+          },
+          onReadVerses: (cloudReadVerses) => {
+            setReadVersesMap(cloudReadVerses);
+            saveGuestReadVerses(cloudReadVerses);
           },
           onError: (err) => {
             setCloudError(err);
@@ -195,7 +286,7 @@ export default function App() {
     };
   }, []);
 
-  // Fetch active chapter verbatim from BSB (HelloAO) or WEB (bible-api.com)
+  // Fetch active chapter (memory -> IndexedDB -> API) & automatically cache next 2 chapters
   useEffect(() => {
     const controller = new AbortController();
     const { translation, bookId, chapter } = readingState;
@@ -205,6 +296,7 @@ export default function App() {
       setChapterData(cached);
       setChapterError(null);
       setIsLoadingChapter(false);
+      void prefetchUpcomingChapters({ translation, bookId, chapter, count: 2 });
       return () => controller.abort();
     }
 
@@ -221,52 +313,75 @@ export default function App() {
         if (controller.signal.aborted) return;
         setChapterData(data);
         setChapterError(null);
+        setIsLoadingChapter(false);
+        void prefetchUpcomingChapters({ translation, bookId, chapter, count: 2 });
       })
       .catch((err) => {
         if (controller.signal.aborted) return;
         console.error('Scripture load error:', err);
         setChapterData(null);
         setChapterError('Unable to load scripture—check connection or switch translation.');
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) {
-          setIsLoadingChapter(false);
-        }
+        setIsLoadingChapter(false);
       });
 
     return () => controller.abort();
   }, [readingState.translation, readingState.bookId, readingState.chapter, reloadNonce]);
 
-  // Scroll to target verse and observe active centered verse card inside the snap container
+  const cards = useMemo(
+    () => buildVerseCards(chapterData, readingState.smartGrouping),
+    [chapterData, readingState.smartGrouping],
+  );
+
+  useEffect(() => {
+    lastCardSettledAtRef.current = Date.now();
+  }, [activeCardIndex, readingState.bookId, readingState.chapter]);
+
+  // Scroll to target verse card and observe active centered card inside the snap container
   useEffect(() => {
     const container = feedRef.current;
-    if (!container || !chapterData || chapterData.verses.length === 0) return;
+    if (!container || isLoadingChapter || Boolean(chapterError) || cards.length === 0) return;
 
     const desiredVerse = pendingTargetVerseRef.current ?? 1;
     pendingTargetVerseRef.current = null;
 
     const targetIdx =
       desiredVerse === -1
-        ? chapterData.verses.length - 1
+        ? cards.length - 1
         : Math.max(
             0,
-            chapterData.verses.findIndex((v) => v.verse === desiredVerse),
+            cards.findIndex((c) => desiredVerse >= c.startVerse && desiredVerse <= c.endVerse),
           );
-    setActiveVerseIndex(targetIdx);
+    setActiveCardIndex(targetIdx);
+    lastCardSettledAtRef.current = Date.now();
+
+    const targetCard = cards[targetIdx];
+    if (targetCard) {
+      setReadingState((prev) =>
+        prev.verse === targetCard.startVerse &&
+        prev.bookId === targetCard.bookId &&
+        prev.chapter === targetCard.chapter
+          ? prev
+          : {
+              ...prev,
+              bookId: targetCard.bookId,
+              bookName: targetCard.bookName,
+              chapter: targetCard.chapter,
+              verse: targetCard.startVerse,
+            },
+      );
+    }
 
     let observer: IntersectionObserver | null = null;
     const rafId = requestAnimationFrame(() => {
-      const targetEl = container.querySelector<HTMLElement>(
-        `[data-verse="${chapterData.verses[targetIdx].verse}"]`,
-      );
+      const targetEl = container.querySelector<HTMLElement>(`[data-card-index="${targetIdx}"]`);
       if (targetEl) {
         targetEl.scrollIntoView({ behavior: 'auto', block: 'start' });
       } else {
         container.scrollTo({ top: 0, behavior: 'auto' });
       }
 
-      const cards = Array.from(container.querySelectorAll<HTMLElement>('article[data-verse]'));
-      if (cards.length === 0) return;
+      const cardEls = Array.from(container.querySelectorAll<HTMLElement>('article[data-card-index]'));
+      if (cardEls.length === 0) return;
 
       observer = new IntersectionObserver(
         (entries) => {
@@ -280,21 +395,21 @@ export default function App() {
             }
           }
           if (bestEntry) {
-            const verseNum = Number(bestEntry.target.getAttribute('data-verse'));
-            const idx = chapterData.verses.findIndex((v) => v.verse === verseNum);
-            if (idx >= 0) {
-              setActiveVerseIndex(idx);
+            const idx = Number(bestEntry.target.getAttribute('data-card-index'));
+            const activeCard = cards[idx];
+            if (activeCard) {
+              setActiveCardIndex(idx);
               setReadingState((prev) =>
-                prev.verse === verseNum &&
-                prev.bookId === chapterData.bookId &&
-                prev.chapter === chapterData.chapter
+                prev.verse === activeCard.startVerse &&
+                prev.bookId === activeCard.bookId &&
+                prev.chapter === activeCard.chapter
                   ? prev
                   : {
                       ...prev,
-                      bookId: chapterData.bookId,
-                      bookName: chapterData.bookName,
-                      chapter: chapterData.chapter,
-                      verse: verseNum,
+                      bookId: activeCard.bookId,
+                      bookName: activeCard.bookName,
+                      chapter: activeCard.chapter,
+                      verse: activeCard.startVerse,
                     },
               );
             }
@@ -306,14 +421,92 @@ export default function App() {
         },
       );
 
-      cards.forEach((card) => observer?.observe(card));
+      cardEls.forEach((el) => observer?.observe(el));
     });
 
     return () => {
       cancelAnimationFrame(rafId);
       observer?.disconnect();
     };
-  }, [chapterData]);
+  }, [cards, chapterError, isLoadingChapter]);
+
+  // Passive 1.5s dwell-time read tracking & daily streak update
+  useEffect(() => {
+    if (
+      isLoadingChapter ||
+      Boolean(chapterError) ||
+      isMenuOpen ||
+      isBooksOpen ||
+      isBookmarksOpen ||
+      isNotesOpen ||
+      isSettingsOpen ||
+      isStatsOpen ||
+      Boolean(noteModalTarget) ||
+      !isDocumentVisible
+    ) {
+      return;
+    }
+
+    const activeCard = cards[activeCardIndex];
+    if (!activeCard) return;
+
+    const timer = window.setTimeout(() => {
+      const cardVerseIds = activeCard.verses.map((v) =>
+        makeReadVerseId(v.bookId, v.chapter, v.verse),
+      );
+      const existingReads = readVersesMapRef.current;
+      const newlyReadIds = cardVerseIds.filter((id) => !existingReads[id]);
+
+      if (newlyReadIds.length > 0) {
+        const updatedReads: Record<string, boolean> = { ...existingReads };
+        for (const id of newlyReadIds) {
+          updatedReads[id] = true;
+        }
+        setReadVersesMap(updatedReads);
+        saveGuestReadVerses(updatedReads);
+
+        if (user) {
+          void markBookVersesReadInCloud(
+            user.uid,
+            activeCard.bookId,
+            newlyReadIds,
+            readingStateRef.current,
+          ).catch((err) => {
+            setCloudError(err instanceof Error ? err : new Error(String(err)));
+          });
+        }
+      }
+
+      const { next: nextStreak, changed: streakChanged } = applyReadTodayToStreak(
+        streakStatsRef.current,
+      );
+      if (streakChanged) {
+        setStreakStats(nextStreak);
+        saveGuestStreak(nextStreak);
+        if (user) {
+          void updateCloudStreak(user.uid, nextStreak, readingStateRef.current).catch((err) => {
+            setCloudError(err instanceof Error ? err : new Error(String(err)));
+          });
+        }
+      }
+    }, 1500);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    activeCardIndex,
+    cards,
+    chapterError,
+    isBookmarksOpen,
+    isBooksOpen,
+    isDocumentVisible,
+    isLoadingChapter,
+    isMenuOpen,
+    isNotesOpen,
+    isSettingsOpen,
+    isStatsOpen,
+    noteModalTarget,
+    user,
+  ]);
 
   // Debounced cloud reading progress update
   useEffect(() => {
@@ -400,62 +593,378 @@ export default function App() {
     [readingState.bookId, readingState.chapter],
   );
 
-  const stepVerse = useCallback(
+  const nextChapter = useMemo(
+    () => getNextChapterLocation(readingState.bookId, readingState.chapter),
+    [readingState.bookId, readingState.chapter],
+  );
+
+  const goToPreviousChapterAtEnd = useCallback(() => {
+    if (!previousChapter) return;
+    const isBookBoundary = previousChapter.bookId !== readingStateRef.current.bookId;
+    navigateToLocation(previousChapter.bookId, previousChapter.chapter, -1, {
+      recordHistory: false,
+    });
+    if (isBookBoundary) {
+      showToast(`${previousChapter.bookName} ${previousChapter.chapter}`);
+    }
+  }, [navigateToLocation, previousChapter, showToast]);
+
+  const goToNextChapterAtStart = useCallback(() => {
+    if (!nextChapter) return;
+    const isBookBoundary = nextChapter.bookId !== readingStateRef.current.bookId;
+    navigateToLocation(nextChapter.bookId, nextChapter.chapter, 1, {
+      recordHistory: false,
+    });
+    if (isBookBoundary) {
+      showToast(`${nextChapter.bookName} ${nextChapter.chapter}`);
+    }
+  }, [navigateToLocation, nextChapter, showToast]);
+
+  const stepCard = useCallback(
     (delta: -1 | 1) => {
       const container = feedRef.current;
-      if (!container || !chapterData) return;
+      if (!container || cards.length === 0) return;
 
-      if (delta === -1 && activeVerseIndex <= 0) {
-        if (previousChapter) {
-          navigateToLocation(previousChapter.bookId, previousChapter.chapter, -1, {
-            recordHistory: false,
-          });
-        }
+      if (delta === -1 && activeCardIndex <= 0) {
+        goToPreviousChapterAtEnd();
         return;
       }
 
-      const nextIndex = Math.max(
-        0,
-        Math.min(chapterData.verses.length - 1, activeVerseIndex + delta),
-      );
-      if (nextIndex === activeVerseIndex) return;
-      const targetVerse = chapterData.verses[nextIndex];
-      const targetEl = container.querySelector<HTMLElement>(`[data-verse="${targetVerse.verse}"]`);
+      if (delta === 1 && activeCardIndex >= cards.length - 1) {
+        goToNextChapterAtStart();
+        return;
+      }
+
+      const nextIndex = Math.max(0, Math.min(cards.length - 1, activeCardIndex + delta));
+      if (nextIndex === activeCardIndex) return;
+      const targetEl = container.querySelector<HTMLElement>(`[data-card-index="${nextIndex}"]`);
       if (targetEl) {
         targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }
     },
-    [activeVerseIndex, chapterData, navigateToLocation, previousChapter],
+    [activeCardIndex, cards.length, goToNextChapterAtStart, goToPreviousChapterAtEnd],
   );
 
-  // Keyboard arrow support for desktop navigation
+  const handleFeedTouchStart = useCallback(
+    (e: React.TouchEvent<HTMLElement>) => {
+      if (
+        e.touches.length !== 1 ||
+        isMenuOpen ||
+        isBooksOpen ||
+        isBookmarksOpen ||
+        isNotesOpen ||
+        isSettingsOpen ||
+        isStatsOpen ||
+        Boolean(noteModalTarget) ||
+        isLoadingChapter ||
+        Boolean(chapterError) ||
+        cards.length === 0
+      ) {
+        touchGestureRef.current = null;
+        return;
+      }
+
+      const container = feedRef.current;
+      if (!container) return;
+
+      const touch = e.touches[0];
+      const targetEl = e.target as HTMLElement | null;
+      const scrollableTarget = targetEl?.closest<HTMLElement>('[data-verse-scrollable="true"]') ?? null;
+      const now = Date.now();
+      const cardHeight = container.clientHeight || window.innerHeight || 1;
+      const startIndex = Math.max(
+        0,
+        Math.min(cards.length - 1, Math.round(container.scrollTop / cardHeight)),
+      );
+
+      touchGestureRef.current = {
+        startX: touch.clientX,
+        startY: touch.clientY,
+        lastX: touch.clientX,
+        lastY: touch.clientY,
+        startTime: now,
+        lastMoveTime: now,
+        startScrollTop: container.scrollTop,
+        startIndex,
+        scrollableTarget,
+        startInnerScrollTop: scrollableTarget?.scrollTop ?? 0,
+      };
+    },
+    [
+      cards.length,
+      chapterError,
+      isBookmarksOpen,
+      isBooksOpen,
+      isLoadingChapter,
+      isMenuOpen,
+      isNotesOpen,
+      isSettingsOpen,
+      isStatsOpen,
+      noteModalTarget,
+    ],
+  );
+
+  const handleFeedTouchMove = useCallback((e: React.TouchEvent<HTMLElement>) => {
+    if (e.touches.length !== 1) {
+      touchGestureRef.current = null;
+      return;
+    }
+    const gesture = touchGestureRef.current;
+    if (!gesture) return;
+    const touch = e.touches[0];
+    gesture.lastX = touch.clientX;
+    gesture.lastY = touch.clientY;
+    gesture.lastMoveTime = Date.now();
+  }, []);
+
+  const handleFeedTouchEnd = useCallback(() => {
+    const gesture = touchGestureRef.current;
+    touchGestureRef.current = null;
+    const container = feedRef.current;
+    if (!gesture || !container || cards.length === 0) return;
+
+    const now = Date.now();
+    const deltaY = gesture.lastY - gesture.startY;
+    const deltaX = Math.abs(gesture.lastX - gesture.startX);
+    const absY = Math.abs(deltaY);
+
+    if (absY < 20 || absY <= deltaX * 1.15) return;
+    if (now - gesture.lastMoveTime > 200) return;
+
+    const inner = gesture.scrollableTarget;
+    if (inner) {
+      if (deltaY > 0 && gesture.startInnerScrollTop > 2) return;
+      if (
+        deltaY < 0 &&
+        gesture.startInnerScrollTop + inner.clientHeight < inner.scrollHeight - 2
+      ) {
+        return;
+      }
+    }
+
+    const totalMs = Math.max(1, now - gesture.startTime);
+    const velocity = absY / totalMs;
+    const isIntentionalSwipe = absY >= 32 || (absY >= 20 && velocity >= 0.18);
+    if (!isIntentionalSwipe) return;
+
+    const direction: -1 | 1 = deltaY > 0 ? -1 : 1;
+    const isAtFirstCard =
+      gesture.startIndex <= 0 || (activeCardIndex <= 0 && gesture.startScrollTop <= 2);
+    const isAtLastCard =
+      gesture.startIndex >= cards.length - 1 ||
+      (activeCardIndex >= cards.length - 1 &&
+        gesture.startScrollTop + container.clientHeight >= container.scrollHeight - 2);
+
+    if (direction === -1 && isAtFirstCard) {
+      if (previousChapter && now - boundaryTransitionAtRef.current >= 450) {
+        boundaryTransitionAtRef.current = now;
+        goToPreviousChapterAtEnd();
+      }
+      return;
+    }
+
+    if (direction === 1 && isAtLastCard) {
+      if (nextChapter && now - boundaryTransitionAtRef.current >= 450) {
+        boundaryTransitionAtRef.current = now;
+        goToNextChapterAtStart();
+      }
+      return;
+    }
+
+    const targetIndex = gesture.startIndex + direction;
+    if (targetIndex < 0 || targetIndex >= cards.length) return;
+
+    requestAnimationFrame(() => {
+      const currentContainer = feedRef.current;
+      if (!currentContainer) return;
+      const cardHeight = currentContainer.clientHeight || window.innerHeight || 1;
+      if (Math.abs(currentContainer.scrollTop - gesture.startScrollTop) >= cardHeight * 0.85) {
+        return;
+      }
+      const targetEl = currentContainer.querySelector<HTMLElement>(
+        `[data-card-index="${targetIndex}"]`,
+      );
+      if (targetEl) {
+        targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    });
+  }, [
+    activeCardIndex,
+    cards.length,
+    goToNextChapterAtStart,
+    goToPreviousChapterAtEnd,
+    nextChapter,
+    previousChapter,
+  ]);
+
+  const handleFeedTouchCancel = useCallback(() => {
+    touchGestureRef.current = null;
+  }, []);
+
+  const handleFeedWheel = useCallback(
+    (e: React.WheelEvent<HTMLElement>) => {
+      if (
+        isMenuOpen ||
+        isBooksOpen ||
+        isBookmarksOpen ||
+        isNotesOpen ||
+        isSettingsOpen ||
+        isStatsOpen ||
+        Boolean(noteModalTarget) ||
+        isLoadingChapter ||
+        Boolean(chapterError) ||
+        cards.length === 0
+      ) {
+        return;
+      }
+
+      if (Math.abs(e.deltaY) <= Math.abs(e.deltaX) || Math.abs(e.deltaY) < 8) {
+        return;
+      }
+
+      const container = feedRef.current;
+      if (!container) return;
+
+      const now = Date.now();
+      if (
+        now - boundaryTransitionAtRef.current < 600 ||
+        now - lastCardSettledAtRef.current < 320
+      ) {
+        wheelBoundaryAccumRef.current = { deltaY: 0, lastEventAt: now };
+        return;
+      }
+
+      const targetEl = e.target as HTMLElement | null;
+      const inner = targetEl?.closest<HTMLElement>('[data-verse-scrollable="true"]') ?? null;
+      if (inner) {
+        if (e.deltaY < 0 && inner.scrollTop > 2) return;
+        if (
+          e.deltaY > 0 &&
+          inner.scrollTop + inner.clientHeight < inner.scrollHeight - 2
+        ) {
+          return;
+        }
+      }
+
+      const atTopBoundary = activeCardIndex <= 0 && container.scrollTop <= 2;
+      const atBottomBoundary =
+        activeCardIndex >= cards.length - 1 &&
+        container.scrollTop + container.clientHeight >= container.scrollHeight - 2;
+
+      if (e.deltaY < 0 && atTopBoundary && previousChapter) {
+        const prevAccum = wheelBoundaryAccumRef.current;
+        const nextAccum =
+          now - prevAccum.lastEventAt <= 220 && prevAccum.deltaY < 0
+            ? prevAccum.deltaY + e.deltaY
+            : e.deltaY;
+        wheelBoundaryAccumRef.current = { deltaY: nextAccum, lastEventAt: now };
+
+        if (nextAccum <= -48) {
+          wheelBoundaryAccumRef.current = { deltaY: 0, lastEventAt: now };
+          boundaryTransitionAtRef.current = now;
+          goToPreviousChapterAtEnd();
+        }
+        return;
+      }
+
+      if (e.deltaY > 0 && atBottomBoundary && nextChapter) {
+        const prevAccum = wheelBoundaryAccumRef.current;
+        const nextAccum =
+          now - prevAccum.lastEventAt <= 220 && prevAccum.deltaY > 0
+            ? prevAccum.deltaY + e.deltaY
+            : e.deltaY;
+        wheelBoundaryAccumRef.current = { deltaY: nextAccum, lastEventAt: now };
+
+        if (nextAccum >= 48) {
+          wheelBoundaryAccumRef.current = { deltaY: 0, lastEventAt: now };
+          boundaryTransitionAtRef.current = now;
+          goToNextChapterAtStart();
+        }
+        return;
+      }
+
+      wheelBoundaryAccumRef.current = { deltaY: 0, lastEventAt: now };
+    },
+    [
+      activeCardIndex,
+      cards.length,
+      chapterError,
+      goToNextChapterAtStart,
+      goToPreviousChapterAtEnd,
+      isBookmarksOpen,
+      isBooksOpen,
+      isLoadingChapter,
+      isMenuOpen,
+      isNotesOpen,
+      isSettingsOpen,
+      isStatsOpen,
+      nextChapter,
+      noteModalTarget,
+      previousChapter,
+    ],
+  );
+
+  // Keyboard arrow & Escape support
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (isBooksOpen || isBookmarksOpen || isSettingsOpen) return;
+      if (e.key === 'Escape' && isMenuOpen) {
+        e.preventDefault();
+        setIsMenuOpen(false);
+        return;
+      }
+      if (e.key === 'Escape' && isNotesOpen && !noteModalTarget) {
+        e.preventDefault();
+        setIsNotesOpen(false);
+        return;
+      }
+      if (
+        isMenuOpen ||
+        isBooksOpen ||
+        isBookmarksOpen ||
+        isNotesOpen ||
+        isSettingsOpen ||
+        isStatsOpen ||
+        Boolean(noteModalTarget)
+      ) {
+        return;
+      }
       if (e.key === 'ArrowDown' || e.key === 'PageDown') {
         e.preventDefault();
-        stepVerse(1);
+        stepCard(1);
       } else if (e.key === 'ArrowUp' || e.key === 'PageUp') {
         e.preventDefault();
-        stepVerse(-1);
+        stepCard(-1);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isBooksOpen, isBookmarksOpen, isSettingsOpen, stepVerse]);
+  }, [
+    isMenuOpen,
+    isBooksOpen,
+    isBookmarksOpen,
+    isNotesOpen,
+    isSettingsOpen,
+    isStatsOpen,
+    noteModalTarget,
+    stepCard,
+  ]);
 
   const handleToggleLike = useCallback(
-    (verse: VerseItem) => {
-      const key = makeVerseKey(verse.bookId, verse.chapter, verse.verse);
-      const currentlyLiked = Boolean(likesMap[key]);
-      const nextLiked = !currentlyLiked;
+    (card: VerseCardItem) => {
+      const matchingKeys = card.verses
+        .map((v) => makeVerseKey(v.bookId, v.chapter, v.verse))
+        .filter((k) => Boolean(likesMap[k]));
+      const nextLiked = matchingKeys.length === 0;
+      const newRecord = cardToSavedRecord(card);
 
       setLikesMap((prev) => {
         const next = { ...prev };
         if (nextLiked) {
-          next[key] = verseToSavedRecord(verse);
+          next[newRecord.verseKey] = newRecord;
         } else {
-          delete next[key];
+          for (const k of matchingKeys) {
+            delete next[k];
+          }
         }
         if (!user) {
           saveGuestLikes(next);
@@ -464,32 +973,53 @@ export default function App() {
       });
 
       if (user) {
-        void toggleCloudSavedVerse(
-          user.uid,
-          'likes',
-          verse,
-          nextLiked,
-          readingStateRef.current,
-        ).catch((err) => {
-          setCloudError(err instanceof Error ? err : new Error(String(err)));
-        });
+        if (nextLiked) {
+          void toggleCloudSavedRecord(
+            user.uid,
+            'likes',
+            newRecord,
+            true,
+            readingStateRef.current,
+          ).catch((err) => {
+            setCloudError(err instanceof Error ? err : new Error(String(err)));
+          });
+        } else {
+          for (const k of matchingKeys) {
+            const existingRec = likesMap[k];
+            if (existingRec) {
+              void toggleCloudSavedRecord(
+                user.uid,
+                'likes',
+                existingRec,
+                false,
+                readingStateRef.current,
+              ).catch((err) => {
+                setCloudError(err instanceof Error ? err : new Error(String(err)));
+              });
+            }
+          }
+        }
       }
     },
     [likesMap, user],
   );
 
   const handleToggleBookmark = useCallback(
-    (verse: VerseItem) => {
-      const key = makeVerseKey(verse.bookId, verse.chapter, verse.verse);
-      const currentlyBookmarked = Boolean(bookmarksMap[key]);
-      const nextBookmarked = !currentlyBookmarked;
+    (card: VerseCardItem) => {
+      const matchingKeys = card.verses
+        .map((v) => makeVerseKey(v.bookId, v.chapter, v.verse))
+        .filter((k) => Boolean(bookmarksMap[k]));
+      const nextBookmarked = matchingKeys.length === 0;
+      const newRecord = cardToSavedRecord(card);
 
       setBookmarksMap((prev) => {
         const next = { ...prev };
         if (nextBookmarked) {
-          next[key] = verseToSavedRecord(verse);
+          next[newRecord.verseKey] = newRecord;
         } else {
-          delete next[key];
+          for (const k of matchingKeys) {
+            delete next[k];
+          }
         }
         if (!user) {
           saveGuestBookmarks(next);
@@ -497,27 +1027,43 @@ export default function App() {
         return next;
       });
 
-      showToast(nextBookmarked ? `Bookmarked ${verse.reference}` : `Removed bookmark`);
+      showToast(nextBookmarked ? `Bookmarked ${card.reference}` : `Removed bookmark`);
 
       if (user) {
-        void toggleCloudSavedVerse(
-          user.uid,
-          'bookmarks',
-          verse,
-          nextBookmarked,
-          readingStateRef.current,
-        ).catch((err) => {
-          setCloudError(err instanceof Error ? err : new Error(String(err)));
-        });
+        if (nextBookmarked) {
+          void toggleCloudSavedRecord(
+            user.uid,
+            'bookmarks',
+            newRecord,
+            true,
+            readingStateRef.current,
+          ).catch((err) => {
+            setCloudError(err instanceof Error ? err : new Error(String(err)));
+          });
+        } else {
+          for (const k of matchingKeys) {
+            const existingRec = bookmarksMap[k];
+            if (existingRec) {
+              void toggleCloudSavedRecord(
+                user.uid,
+                'bookmarks',
+                existingRec,
+                false,
+                readingStateRef.current,
+              ).catch((err) => {
+                setCloudError(err instanceof Error ? err : new Error(String(err)));
+              });
+            }
+          }
+        }
       }
     },
     [bookmarksMap, showToast, user],
   );
 
-  const copyVerseText = useCallback(
-    async (verse: VerseItem, customToast?: string) => {
-      const key = makeVerseKey(verse.bookId, verse.chapter, verse.verse);
-      const formatted = `"${verse.text}" — ${verse.reference} (${verse.translation})`;
+  const copyCardText = useCallback(
+    async (card: VerseCardItem, customToast?: string) => {
+      const formatted = `"${card.combinedText}" — ${card.reference} (${card.translation})`;
 
       try {
         if (navigator.clipboard?.writeText) {
@@ -532,8 +1078,8 @@ export default function App() {
           document.execCommand('copy');
           document.body.removeChild(area);
         }
-        setCopiedVerseKey(key);
-        showToast(customToast ?? `Copied ${verse.reference}`);
+        setCopiedCardId(card.id);
+        showToast(customToast ?? `Copied ${card.reference}`);
       } catch {
         showToast('Unable to copy to clipboard');
       }
@@ -542,12 +1088,12 @@ export default function App() {
   );
 
   const handleShare = useCallback(
-    async (verse: VerseItem) => {
-      const formatted = `"${verse.text}" — ${verse.reference} (${verse.translation})`;
+    async (card: VerseCardItem) => {
+      const formatted = `"${card.combinedText}" — ${card.reference} (${card.translation})`;
       if (typeof navigator.share === 'function') {
         try {
           await navigator.share({
-            title: `${verse.reference} (${verse.translation})`,
+            title: `${card.reference} (${card.translation})`,
             text: formatted,
           });
           return;
@@ -557,9 +1103,9 @@ export default function App() {
           }
         }
       }
-      await copyVerseText(verse, `Copied ${verse.reference} to share`);
+      await copyCardText(card, `Copied ${card.reference} to share`);
     },
-    [copyVerseText],
+    [copyCardText],
   );
 
   const handleChangeTranslation = useCallback(
@@ -579,6 +1125,18 @@ export default function App() {
     [readingState.translation, readingState.verse, showToast],
   );
 
+  const handleToggleSmartGrouping = useCallback(() => {
+    pendingTargetVerseRef.current = readingState.verse;
+    const nextGrouping = !readingState.smartGrouping;
+    setReadingState((prev) => ({
+      ...prev,
+      smartGrouping: nextGrouping,
+    }));
+    showToast(
+      nextGrouping ? 'Smart Verse Grouping enabled' : 'Single-verse cards enabled',
+    );
+  }, [readingState.smartGrouping, readingState.verse, showToast]);
+
   const handleGoogleSignIn = useCallback(async () => {
     setAuthLoading(true);
     setAuthError(null);
@@ -586,7 +1144,7 @@ export default function App() {
     setAuthLoading(false);
 
     if (outcome.status === 'signed_in') {
-      showToast('Signed in — syncing likes & bookmarks');
+      showToast('Signed in — syncing reading stats & bookmarks');
     } else if (outcome.status === 'cancelled' || outcome.status === 'error') {
       setAuthError(outcome.message);
     }
@@ -603,42 +1161,125 @@ export default function App() {
   }, [showToast]);
 
   const handleJumpToSaved = useCallback(
-    (record: SavedVerseRecord) => {
+    (record: { bookId: string; chapter: number; verse: number }) => {
       navigateToLocation(record.bookId, record.chapter, record.verse);
       setIsBookmarksOpen(false);
+      setIsNotesOpen(false);
     },
     [navigateToLocation],
   );
 
   const handleRemoveSaved = useCallback(
     (kind: 'bookmarks' | 'likes', record: SavedVerseRecord) => {
-      const versePayload: VerseItem = {
-        verse: record.verse,
-        text: record.text,
-        reference: record.reference,
-        bookId: record.bookId,
-        bookName: record.bookName,
-        chapter: record.chapter,
-        translation: record.translation,
-      };
       if (kind === 'bookmarks') {
-        handleToggleBookmark(versePayload);
+        setBookmarksMap((prev) => {
+          const next = { ...prev };
+          delete next[record.verseKey];
+          if (!user) saveGuestBookmarks(next);
+          return next;
+        });
+        showToast('Removed bookmark');
       } else {
-        handleToggleLike(versePayload);
+        setLikesMap((prev) => {
+          const next = { ...prev };
+          delete next[record.verseKey];
+          if (!user) saveGuestLikes(next);
+          return next;
+        });
+      }
+
+      if (user) {
+        void toggleCloudSavedRecord(
+          user.uid,
+          kind,
+          record,
+          false,
+          readingStateRef.current,
+        ).catch((err) => {
+          setCloudError(err instanceof Error ? err : new Error(String(err)));
+        });
       }
     },
-    [handleToggleBookmark, handleToggleLike],
+    [showToast, user],
   );
 
-  const nextChapter = useMemo(
-    () => getNextChapterLocation(readingState.bookId, readingState.chapter),
-    [readingState.bookId, readingState.chapter],
+  const findNoteForCard = useCallback(
+    (card: VerseCardItem): VerseNoteRecord | undefined => {
+      for (const v of card.verses) {
+        const key = makeVerseKey(v.bookId, v.chapter, v.verse);
+        if (notesMap[key]) return notesMap[key];
+      }
+      return undefined;
+    },
+    [notesMap],
+  );
+
+  const handleOpenNoteForCard = useCallback(
+    (card: VerseCardItem) => {
+      setNoteModalTarget({
+        card,
+        existing: findNoteForCard(card),
+      });
+    },
+    [findNoteForCard],
+  );
+
+  const handleSaveNote = useCallback(
+    (noteKind: NoteKind, noteText: string) => {
+      if (!noteModalTarget) return;
+      const record = buildVerseNoteRecord({
+        card: noteModalTarget.card,
+        existing: noteModalTarget.existing,
+        noteKind,
+        noteText,
+      });
+
+      setNotesMap((prev) => {
+        const next = { ...prev, [record.verseKey]: record };
+        if (!user) saveGuestNotes(next);
+        return next;
+      });
+
+      setNoteModalTarget(null);
+      showToast(
+        noteKind === 'prayer'
+          ? `Saved prayer for ${record.reference}`
+          : `Saved note for ${record.reference}`,
+      );
+
+      if (user) {
+        void saveCloudVerseNote(user.uid, record, readingStateRef.current).catch((err) => {
+          setCloudError(err instanceof Error ? err : new Error(String(err)));
+        });
+      }
+    },
+    [noteModalTarget, showToast, user],
+  );
+
+  const handleDeleteNote = useCallback(
+    (verseKey: string) => {
+      setNotesMap((prev) => {
+        const next = { ...prev };
+        delete next[verseKey];
+        if (!user) saveGuestNotes(next);
+        return next;
+      });
+
+      setNoteModalTarget((prev) => (prev?.existing?.verseKey === verseKey ? null : prev));
+      showToast('Deleted note');
+
+      if (user) {
+        void deleteCloudVerseNote(user.uid, verseKey).catch((err) => {
+          setCloudError(err instanceof Error ? err : new Error(String(err)));
+        });
+      }
+    },
+    [showToast, user],
   );
 
   const handleNextChapter = useCallback(() => {
-    if (!nextChapter) return;
-    navigateToLocation(nextChapter.bookId, nextChapter.chapter, 1);
-  }, [navigateToLocation, nextChapter]);
+    goToNextChapterAtStart();
+  }, [goToNextChapterAtStart]);
 
   const sortedBookmarks = useMemo(
     () => Object.values(bookmarksMap).sort((a, b) => b.createdAtMs - a.createdAtMs),
@@ -648,20 +1289,29 @@ export default function App() {
     () => Object.values(likesMap).sort((a, b) => b.createdAtMs - a.createdAtMs),
     [likesMap],
   );
+  const sortedNotes = useMemo(
+    () => Object.values(notesMap).sort((a, b) => b.updatedAtMs - a.updatedAtMs),
+    [notesMap],
+  );
 
-  const totalVerses = chapterData?.verses.length ?? 0;
+  const readStats = useMemo(
+    () => computeBibleReadStats(readVersesMap, readingState.translation),
+    [readVersesMap, readingState.translation],
+  );
+
+  const totalCards = cards.length;
   const progressPercent =
-    totalVerses > 0 ? Math.min(100, ((activeVerseIndex + 1) / totalVerses) * 100) : 0;
+    totalCards > 0 ? Math.min(100, ((activeCardIndex + 1) / totalCards) * 100) : 0;
 
   const bibleProgress = useMemo(
     () =>
       getBibleProgressStats(
         readingState.bookId,
         readingState.chapter,
-        activeVerseIndex,
-        totalVerses,
+        activeCardIndex,
+        totalCards,
       ),
-    [readingState.bookId, readingState.chapter, activeVerseIndex, totalVerses],
+    [readingState.bookId, readingState.chapter, activeCardIndex, totalCards],
   );
 
   const sectionTheme = useMemo(
@@ -680,7 +1330,7 @@ export default function App() {
       style={themeStyle}
       className="relative h-[100dvh] w-full overflow-hidden book-theme-bg text-[#F5F2EA] select-none sm:select-text"
     >
-      {/* Top Bar: Books (left), BIBLE REEL (center), Bookmarks & Settings (right) */}
+      {/* Top Bar: Books (left), BIBLE REEL (center), 3-line Menu (right) */}
       <header
         style={{
           backgroundColor: `${sectionTheme.topColor}D9`,
@@ -688,11 +1338,16 @@ export default function App() {
           paddingTop: 'env(safe-area-inset-top, 0px)',
           height: 'calc(env(safe-area-inset-top, 0px) + 56px)',
         }}
-        className="fixed top-0 left-0 right-0 z-30 px-3 sm:px-6 backdrop-blur-md border-b border-white/[0.06] flex items-center justify-between gap-4"
+        className={`fixed top-0 left-0 right-0 ${
+          isMenuOpen ? 'z-40' : 'z-30'
+        } px-3 sm:px-6 backdrop-blur-md border-b border-white/[0.06] flex items-center justify-between gap-4`}
       >
         <button
           type="button"
-          onClick={() => setIsBooksOpen(true)}
+          onClick={() => {
+            setIsMenuOpen(false);
+            setIsBooksOpen(true);
+          }}
           aria-label="Open books and chapters menu"
           className="min-h-[44px] px-2.5 sm:px-3 rounded-xl flex items-center gap-2 text-xs sm:text-sm font-medium text-[#F5F2EA] hover:bg-white/5 transition-colors whitespace-nowrap shrink-0"
         >
@@ -704,29 +1359,94 @@ export default function App() {
           BIBLE REEL
         </h1>
 
-        <div className="flex items-center gap-1 shrink-0">
+        <div className="relative flex items-center shrink-0">
           <button
             type="button"
-            onClick={() => setIsBookmarksOpen(true)}
-            aria-label="Open saved bookmarks and likes"
-            className="relative min-h-[44px] min-w-[44px] rounded-xl flex items-center justify-center text-[#F5F2EA] hover:bg-white/5 transition-colors"
-          >
-            <Bookmark className="w-[18px] h-[18px]" />
-            {sortedBookmarks.length > 0 && (
-              <span className="sr-only">{sortedBookmarks.length} bookmarks</span>
-            )}
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setIsSettingsOpen(true)}
-            aria-label="Open settings and translation selector"
+            onClick={() => setIsMenuOpen((prev) => !prev)}
+            aria-label="Open navigation menu"
+            aria-expanded={isMenuOpen}
+            aria-haspopup="menu"
             className="min-h-[44px] min-w-[44px] rounded-xl flex items-center justify-center text-[#F5F2EA] hover:bg-white/5 transition-colors"
           >
-            <Settings className="w-[18px] h-[18px]" />
+            <Menu className="w-5 h-5" aria-hidden="true" />
           </button>
+
+          {isMenuOpen && (
+            <div
+              role="menu"
+              aria-label="Main menu"
+              className="absolute right-0 top-[calc(100%+8px)] z-50 w-52 rounded-2xl bg-[#141917]/95 backdrop-blur-xl border border-white/10 shadow-2xl p-1.5 flex flex-col gap-0.5"
+            >
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setIsMenuOpen(false);
+                  setIsStatsOpen(true);
+                }}
+                className="w-full min-h-[44px] px-3 rounded-xl flex items-center gap-3 text-sm font-medium text-[#F5F2EA] hover:bg-white/[0.06] transition-colors whitespace-nowrap"
+              >
+                <BarChart3 className="w-4 h-4 text-[#D4AF37]" aria-hidden="true" />
+                <span>Stats</span>
+              </button>
+
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setIsMenuOpen(false);
+                  setIsBookmarksOpen(true);
+                }}
+                className="w-full min-h-[44px] px-3 rounded-xl flex items-center justify-between gap-3 text-sm font-medium text-[#F5F2EA] hover:bg-white/[0.06] transition-colors whitespace-nowrap"
+              >
+                <span className="flex items-center gap-3">
+                  <Bookmark className="w-4 h-4 text-[#D4AF37]" aria-hidden="true" />
+                  <span>Bookmarks</span>
+                </span>
+                {sortedBookmarks.length > 0 && (
+                  <span className="text-xs text-[#9CA8A2] tabular-nums">
+                    {sortedBookmarks.length}
+                  </span>
+                )}
+              </button>
+
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setIsMenuOpen(false);
+                  setIsNotesOpen(true);
+                }}
+                className="w-full min-h-[44px] px-3 rounded-xl flex items-center gap-3 text-sm font-medium text-[#F5F2EA] hover:bg-white/[0.06] transition-colors whitespace-nowrap"
+              >
+                <NotebookPen className="w-4 h-4 text-[#D4AF37]" aria-hidden="true" />
+                <span>Notes</span>
+              </button>
+
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setIsMenuOpen(false);
+                  setIsSettingsOpen(true);
+                }}
+                className="w-full min-h-[44px] px-3 rounded-xl flex items-center gap-3 text-sm font-medium text-[#F5F2EA] hover:bg-white/[0.06] transition-colors whitespace-nowrap"
+              >
+                <Settings className="w-4 h-4 text-[#D4AF37]" aria-hidden="true" />
+                <span>Settings</span>
+              </button>
+            </div>
+          )}
         </div>
       </header>
+
+      {isMenuOpen && (
+        <div
+          aria-hidden="true"
+          onClick={() => setIsMenuOpen(false)}
+          className="fixed inset-0 z-30"
+        />
+      )}
 
       {/* Left-Edge 66-Book Wave Scrubber */}
       <WaveBookScrubber
@@ -735,24 +1455,24 @@ export default function App() {
       />
 
       {/* Right-Edge Floating Up/Down Chevrons */}
-      {!isLoadingChapter && !chapterError && totalVerses > 0 && (
+      {!isLoadingChapter && !chapterError && totalCards > 0 && (
         <div
           aria-label="Verse navigation controls"
           className="fixed right-2.5 sm:right-5 top-1/2 -translate-y-1/2 z-20 flex flex-col items-center gap-2"
         >
           <button
             type="button"
-            onClick={() => stepVerse(-1)}
-            disabled={activeVerseIndex <= 0 && !previousChapter}
+            onClick={() => stepCard(-1)}
+            disabled={activeCardIndex <= 0 && !previousChapter}
             aria-label={
-              activeVerseIndex <= 0 && previousChapter
+              activeCardIndex <= 0 && previousChapter
                 ? `Go to previous chapter (${previousChapter.bookName} ${previousChapter.chapter})`
-                : 'Previous verse'
+                : 'Previous card'
             }
             title={
-              activeVerseIndex <= 0 && previousChapter
+              activeCardIndex <= 0 && previousChapter
                 ? `Previous: ${previousChapter.bookName} ${previousChapter.chapter}`
-                : 'Previous verse'
+                : 'Previous card'
             }
             className="min-h-[44px] min-w-[44px] rounded-full bg-[#161B19]/80 backdrop-blur-md border border-[#D4AF37]/25 text-[#F5F2EA] hover:border-[#D4AF37] flex items-center justify-center transition-colors disabled:opacity-25 disabled:pointer-events-none active:scale-[0.94]"
           >
@@ -760,15 +1480,23 @@ export default function App() {
           </button>
 
           <span className="text-[11px] font-medium text-[#9CA8A2] tabular-nums py-0.5">
-            {activeVerseIndex + 1}/{totalVerses}
+            {activeCardIndex + 1}/{totalCards}
           </span>
 
           <button
             type="button"
-            onClick={() => stepVerse(1)}
-            disabled={activeVerseIndex >= totalVerses - 1}
-            aria-label="Next verse"
-            title="Next verse"
+            onClick={() => stepCard(1)}
+            disabled={activeCardIndex >= totalCards - 1 && !nextChapter}
+            aria-label={
+              activeCardIndex >= totalCards - 1 && nextChapter
+                ? `Go to next chapter (${nextChapter.bookName} ${nextChapter.chapter})`
+                : 'Next card'
+            }
+            title={
+              activeCardIndex >= totalCards - 1 && nextChapter
+                ? `Next: ${nextChapter.bookName} ${nextChapter.chapter}`
+                : 'Next card'
+            }
             className="min-h-[44px] min-w-[44px] rounded-full bg-[#161B19]/80 backdrop-blur-md border border-[#D4AF37]/25 text-[#F5F2EA] hover:border-[#D4AF37] flex items-center justify-center transition-colors disabled:opacity-25 disabled:pointer-events-none active:scale-[0.94]"
           >
             <ChevronDown className="w-5 h-5" />
@@ -798,7 +1526,12 @@ export default function App() {
       {/* Main Full-Screen Snap Feed */}
       <main
         ref={feedRef}
-        className="h-[100dvh] w-full overflow-y-scroll snap-y snap-mandatory no-scrollbar"
+        onTouchStart={handleFeedTouchStart}
+        onTouchMove={handleFeedTouchMove}
+        onTouchEnd={handleFeedTouchEnd}
+        onTouchCancel={handleFeedTouchCancel}
+        onWheel={handleFeedWheel}
+        className="relative h-[100dvh] w-full overflow-y-scroll snap-y snap-mandatory overscroll-y-contain touch-pan-y no-scrollbar"
       >
         {isLoadingChapter ? (
           <div className="h-[100dvh] w-full flex flex-col justify-center px-10 sm:px-16">
@@ -843,24 +1576,38 @@ export default function App() {
             </div>
           </div>
         ) : (
-          chapterData?.verses.map((verse, idx) => {
-            const key = makeVerseKey(verse.bookId, verse.chapter, verse.verse);
+          cards.map((card, idx) => {
+            const isLiked = card.verses.some((v) =>
+              Boolean(likesMap[makeVerseKey(v.bookId, v.chapter, v.verse)]),
+            );
+            const isBookmarked = card.verses.some((v) =>
+              Boolean(bookmarksMap[makeVerseKey(v.bookId, v.chapter, v.verse)]),
+            );
+            const hasNote = Boolean(findNoteForCard(card));
+            const isRead = card.verses.every((v) =>
+              Boolean(readVersesMap[makeReadVerseId(v.bookId, v.chapter, v.verse)]),
+            );
+
             return (
               <VerseCard
-                key={`${verse.translation}_${key}`}
-                verse={verse}
-                isLiked={Boolean(likesMap[key])}
-                isBookmarked={Boolean(bookmarksMap[key])}
-                isLastVerseInChapter={idx === chapterData.verses.length - 1}
+                key={`${card.translation}_${card.id}`}
+                card={card}
+                cardIndex={idx}
+                isLiked={isLiked}
+                isBookmarked={isBookmarked}
+                hasNote={hasNote}
+                isRead={isRead}
+                isLastCardInChapter={idx === cards.length - 1}
                 nextChapterLabel={
                   nextChapter ? `${nextChapter.bookName} ${nextChapter.chapter}` : null
                 }
                 onToggleLike={handleToggleLike}
                 onToggleBookmark={handleToggleBookmark}
+                onOpenNote={handleOpenNoteForCard}
                 onShare={handleShare}
-                onCopy={copyVerseText}
+                onCopy={copyCardText}
                 onNextChapter={handleNextChapter}
-                isCopied={copiedVerseKey === key}
+                isCopied={copiedCardId === card.id}
               />
             );
           })
@@ -873,7 +1620,7 @@ export default function App() {
           <div className="flex items-center justify-between gap-3 text-[10px] font-medium text-[#9CA8A2] tabular-nums">
             <span className="truncate">
               {readingState.bookName} {readingState.chapter}
-              {totalVerses > 0 ? ` · ${activeVerseIndex + 1}/${totalVerses}` : ''}
+              {totalCards > 0 ? ` · ${activeCardIndex + 1}/${totalCards}` : ''}
             </span>
             <span className="whitespace-nowrap shrink-0 flex items-center gap-1.5">
               <span>Bible</span>
@@ -959,8 +1706,19 @@ export default function App() {
         isOpen={isBooksOpen}
         currentBookId={readingState.bookId}
         currentChapter={readingState.chapter}
+        translation={readingState.translation}
+        readStats={readStats}
         onClose={() => setIsBooksOpen(false)}
         onSelectChapter={handleSelectChapterFromDrawer}
+      />
+
+      <StatsModal
+        isOpen={isStatsOpen}
+        isSignedIn={Boolean(user)}
+        streak={streakStats}
+        readStats={readStats}
+        onClose={() => setIsStatsOpen(false)}
+        onSelectBook={(book) => navigateToLocation(book.id, 1, 1)}
       />
 
       <BookmarksModal
@@ -977,14 +1735,41 @@ export default function App() {
         }}
       />
 
+      <NotesModal
+        isOpen={isNotesOpen}
+        isSignedIn={Boolean(user)}
+        notes={sortedNotes}
+        onClose={() => setIsNotesOpen(false)}
+        onJumpToVerse={handleJumpToSaved}
+        onEditNote={(note) => {
+          setNoteModalTarget({ existing: note });
+        }}
+        onDeleteNote={handleDeleteNote}
+        onOpenSettings={() => {
+          setIsNotesOpen(false);
+          setIsSettingsOpen(true);
+        }}
+      />
+
+      <VerseNoteModal
+        isOpen={Boolean(noteModalTarget)}
+        isSignedIn={Boolean(user)}
+        target={noteModalTarget}
+        onClose={() => setNoteModalTarget(null)}
+        onSave={handleSaveNote}
+        onDelete={handleDeleteNote}
+      />
+
       <SettingsModal
         isOpen={isSettingsOpen}
         translation={readingState.translation}
+        smartGrouping={readingState.smartGrouping}
         user={user}
         authLoading={authLoading}
         authError={authError}
         onClose={() => setIsSettingsOpen(false)}
         onChangeTranslation={handleChangeTranslation}
+        onToggleSmartGrouping={handleToggleSmartGrouping}
         onSignIn={handleGoogleSignIn}
         onSignOut={handleSignOut}
       />

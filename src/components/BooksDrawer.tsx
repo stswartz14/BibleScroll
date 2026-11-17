@@ -1,11 +1,18 @@
 import { useMemo, useState } from 'react';
-import { ChevronLeft, Search, X } from 'lucide-react';
+import { Check, ChevronLeft, Search, X } from 'lucide-react';
 import { BIBLE_BOOKS, type BibleBook, type Testament } from '../data/bibleBooks';
+import {
+  getChapterTotalVerses,
+  type BibleReadStats,
+} from '../data/bibleChapterVerseCounts';
+import type { TranslationCode } from '../services/scriptureApi';
 
 interface BooksDrawerProps {
   isOpen: boolean;
   currentBookId: string;
   currentChapter: number;
+  translation: TranslationCode;
+  readStats: BibleReadStats;
   onClose: () => void;
   onSelectChapter: (book: BibleBook, chapter: number) => void;
 }
@@ -14,6 +21,8 @@ export function BooksDrawer({
   isOpen,
   currentBookId,
   currentChapter,
+  translation,
+  readStats,
   onClose,
   onSelectChapter,
 }: BooksDrawerProps) {
@@ -38,6 +47,8 @@ export function BooksDrawer({
     setSelectedBook(null);
     onClose();
   };
+
+  const selectedBookStats = selectedBook ? readStats.byBook[selectedBook.id] : null;
 
   return (
     <div
@@ -84,20 +95,44 @@ export function BooksDrawer({
           /* Chapter Grid */
           <div className="flex-1 overflow-y-auto p-5 space-y-5">
             <div>
-              <p className="text-xs font-medium text-[#D4AF37]">
+              <p
+                className={`text-xs font-medium ${
+                  selectedBook.testament === 'NT' ? 'text-[#6FD3D8]' : 'text-[#D4AF37]'
+                }`}
+              >
                 {selectedBook.testament === 'OT' ? 'Old Testament' : 'New Testament'}
               </p>
               <h3 className="font-scripture text-3xl font-medium text-[#F5F2EA] mt-1">
                 {selectedBook.name}
               </h3>
-              <p className="text-xs text-[#9CA8A2] mt-1 tabular-nums">
-                {selectedBook.chapters} {selectedBook.chapters === 1 ? 'chapter' : 'chapters'}
-              </p>
+              <div className="flex items-center gap-2 text-xs text-[#9CA8A2] mt-1 tabular-nums">
+                <span>
+                  {selectedBook.chapters} {selectedBook.chapters === 1 ? 'chapter' : 'chapters'}
+                </span>
+                {selectedBookStats && selectedBookStats.readVerses > 0 && (
+                  <>
+                    <span aria-hidden="true" className="text-white/25">
+                      ·
+                    </span>
+                    <span className="text-[#F5F2EA]/85">
+                      {selectedBookStats.chaptersCompleted}/{selectedBook.chapters} completed (
+                      {Math.round(selectedBookStats.percent)}%)
+                    </span>
+                  </>
+                )}
+              </div>
             </div>
 
             <div className="grid grid-cols-5 gap-2.5">
               {Array.from({ length: selectedBook.chapters }, (_, i) => i + 1).map((ch) => {
                 const isActive = selectedBook.id === currentBookId && ch === currentChapter;
+                const readInCh = selectedBookStats?.chapterReadCounts[ch] ?? 0;
+                const totalInCh = getChapterTotalVerses(selectedBook.id, ch, translation);
+                const chPct = totalInCh > 0 ? Math.min(100, (readInCh / totalInCh) * 100) : 0;
+                const isCompleted = totalInCh > 0 && readInCh >= totalInCh;
+                const accentBg =
+                  selectedBook.testament === 'NT' ? 'bg-[#6FD3D8]' : 'bg-[#D4AF37]';
+
                 return (
                   <button
                     key={ch}
@@ -106,13 +141,44 @@ export function BooksDrawer({
                       onSelectChapter(selectedBook, ch);
                       setSelectedBook(null);
                     }}
-                    className={`min-h-[44px] rounded-xl text-sm font-medium tabular-nums transition-colors ${
+                    aria-label={
+                      isCompleted
+                        ? `Chapter ${ch}, completed`
+                        : readInCh > 0
+                          ? `Chapter ${ch}, ${Math.round(chPct)}% read`
+                          : `Chapter ${ch}`
+                    }
+                    className={`relative min-h-[46px] rounded-xl text-sm font-medium tabular-nums overflow-hidden flex items-center justify-center transition-colors ${
                       isActive
                         ? 'bg-[#D4AF37] text-[#121514] font-semibold'
-                        : 'bg-white/[0.04] text-[#F5F2EA] border border-white/10 hover:border-[#D4AF37]/50 hover:bg-white/[0.08]'
+                        : isCompleted
+                          ? 'bg-[#D4AF37]/12 text-[#F5F2EA] border border-[#D4AF37]/45 hover:bg-[#D4AF37]/20'
+                          : 'bg-white/[0.04] text-[#F5F2EA] border border-white/10 hover:border-[#D4AF37]/50 hover:bg-white/[0.08]'
                     }`}
                   >
-                    {ch}
+                    <span>{ch}</span>
+
+                    {isCompleted && (
+                      <Check
+                        className={`w-2.5 h-2.5 absolute top-1.5 right-1.5 ${
+                          isActive ? 'text-[#121514]' : 'text-[#D4AF37]'
+                        }`}
+                        strokeWidth={3}
+                        aria-hidden="true"
+                      />
+                    )}
+
+                    {!isCompleted && chPct > 0 && (
+                      <span
+                        aria-hidden="true"
+                        className="absolute bottom-0 left-0 right-0 h-[2px] bg-white/10"
+                      >
+                        <span
+                          className={`block h-full ${isActive ? 'bg-[#121514]/50' : accentBg}`}
+                          style={{ width: `${chPct}%` }}
+                        />
+                      </span>
+                    )}
                   </button>
                 );
               })}
@@ -169,28 +235,64 @@ export function BooksDrawer({
               ) : (
                 filteredBooks.map((book) => {
                   const isCurrent = book.id === currentBookId;
+                  const bookStats = readStats.byBook[book.id];
+                  const readPct = bookStats?.percent ?? 0;
+                  const isBookDone =
+                    bookStats && bookStats.chaptersCompleted >= book.chapters && book.chapters > 0;
+                  const isNT = book.testament === 'NT';
+
                   return (
                     <button
                       key={book.id}
                       type="button"
                       onClick={() => setSelectedBook(book)}
-                      className={`w-full min-h-[54px] px-5 py-3 flex items-center justify-between text-left transition-colors hover:bg-white/[0.04] ${
+                      className={`w-full min-h-[58px] px-5 py-3 flex flex-col justify-center gap-1.5 text-left transition-colors hover:bg-white/[0.04] ${
                         isCurrent ? 'bg-[#D4AF37]/10' : ''
                       }`}
                     >
-                      <div className="flex items-center gap-3">
-                        <span
-                          className={`text-sm font-medium ${
-                            isCurrent ? 'text-[#D4AF37] font-semibold' : 'text-[#F5F2EA]'
-                          }`}
-                        >
-                          {book.name}
-                        </span>
-                        <span className="text-xs text-[#9CA8A2]">{book.testament}</span>
+                      <div className="w-full flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <span
+                            className={`text-sm font-medium truncate ${
+                              isCurrent ? 'text-[#D4AF37] font-semibold' : 'text-[#F5F2EA]'
+                            }`}
+                          >
+                            {book.name}
+                          </span>
+                          <span
+                            className={`text-[11px] font-medium ${
+                              isNT ? 'text-[#6FD3D8]/80' : 'text-[#9CA8A2]'
+                            }`}
+                          >
+                            {book.testament}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center gap-2 text-xs text-[#9CA8A2] tabular-nums shrink-0">
+                          {isBookDone ? (
+                            <span className="inline-flex items-center gap-1 text-[#D4AF37] font-medium">
+                              <Check className="w-3.5 h-3.5" strokeWidth={2.5} aria-hidden="true" />
+                              <span>Done</span>
+                            </span>
+                          ) : bookStats && bookStats.readVerses > 0 ? (
+                            <span className={isNT ? 'text-[#6FD3D8]' : 'text-[#D4AF37]'}>
+                              {Math.max(1, Math.round(readPct))}%
+                            </span>
+                          ) : null}
+                          <span>{book.chapters} ch</span>
+                        </div>
                       </div>
-                      <span className="text-xs text-[#9CA8A2] tabular-nums">
-                        {book.chapters} ch
-                      </span>
+
+                      {bookStats && bookStats.readVerses > 0 && (
+                        <div className="w-full h-[2px] rounded-full bg-white/10 overflow-hidden">
+                          <div
+                            className={`h-full rounded-full ${
+                              isNT ? 'bg-[#6FD3D8]' : 'bg-[#D4AF37]'
+                            }`}
+                            style={{ width: `${Math.min(100, Math.max(2, readPct))}%` }}
+                          />
+                        </div>
+                      )}
                     </button>
                   );
                 })

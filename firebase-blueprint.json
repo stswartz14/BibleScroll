@@ -2,7 +2,7 @@
   "entities": {
     "UserReadingState": {
       "title": "UserReadingState",
-      "description": "Stores a signed-in user's preferred scripture translation and last-read chapter and verse position.",
+      "description": "Stores a signed-in user's preferred scripture translation, smart verse grouping preference, reading streak metrics, and last-read chapter and verse position.",
       "type": "object",
       "properties": {
         "uid": {
@@ -38,6 +38,25 @@
           "type": "integer",
           "description": "Current verse number (1-176)."
         },
+        "smartGrouping": {
+          "type": "boolean",
+          "description": "Whether consecutive short/incomplete-sentence verses are grouped into cohesive reel cards."
+        },
+        "currentStreak": {
+          "type": "integer",
+          "description": "Current daily reading streak count in days."
+        },
+        "longestStreak": {
+          "type": "integer",
+          "description": "Longest daily reading streak achieved in days."
+        },
+        "lastReadDate": {
+          "type": "string",
+          "description": "Last local calendar date (YYYY-MM-DD) when a verse passed the 1.5s dwell read threshold.",
+          "minLength": 0,
+          "maxLength": 10,
+          "pattern": "^(|[0-9]{4}-[0-9]{2}-[0-9]{2})$"
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",
@@ -53,7 +72,7 @@
     },
     "SavedVerse": {
       "title": "SavedVerse",
-      "description": "A liked or bookmarked verbatim scripture verse saved by a user.",
+      "description": "A liked or bookmarked verbatim scripture verse or grouped verse range saved by a user.",
       "type": "object",
       "properties": {
         "verseKey": {
@@ -89,11 +108,11 @@
         },
         "verse": {
           "type": "integer",
-          "description": "Verse number."
+          "description": "Starting verse number."
         },
         "reference": {
           "type": "string",
-          "description": "Human-readable verse reference (e.g. Genesis 1:1).",
+          "description": "Human-readable verse or verse-range reference (e.g. Genesis 1:1 or 1 Thessalonians 5:16–18).",
           "minLength": 3,
           "maxLength": 60
         },
@@ -126,12 +145,143 @@
         "translation",
         "createdAt"
       ]
+    },
+    "BookReadProgress": {
+      "title": "BookReadProgress",
+      "description": "Tracks every individual canonical verse ID (e.g. GEN-1-1) read within a single Bible book via passive 1.5s dwell tracking.",
+      "type": "object",
+      "properties": {
+        "bookId": {
+          "type": "string",
+          "description": "USFM 3-character uppercase book identifier matching the document ID.",
+          "minLength": 3,
+          "maxLength": 3,
+          "pattern": "^[A-Z0-9]{3}$"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "versesMap": {
+          "type": "object",
+          "description": "Map of canonical read verse IDs (e.g. GEN-1-1) to boolean true."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when progress for this book began."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the latest read update in this book."
+        }
+      },
+      "required": ["bookId", "ownerId", "versesMap", "createdAt", "updatedAt"]
+    },
+    "VerseNote": {
+      "title": "VerseNote",
+      "description": "A personal note or prayer attached to a scripture verse or grouped verse range.",
+      "type": "object",
+      "properties": {
+        "verseKey": {
+          "type": "string",
+          "description": "Canonical deterministic key in USFM_CHAPTER_VERSE format (e.g. GEN_1_1).",
+          "minLength": 5,
+          "maxLength": 15,
+          "pattern": "^[A-Z0-9]{3}_[0-9]{1,3}_[0-9]{1,3}$"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "bookId": {
+          "type": "string",
+          "description": "USFM 3-character book identifier.",
+          "minLength": 3,
+          "maxLength": 3,
+          "pattern": "^[A-Z0-9]{3}$"
+        },
+        "bookName": {
+          "type": "string",
+          "description": "Full book name.",
+          "minLength": 2,
+          "maxLength": 40
+        },
+        "chapter": {
+          "type": "integer",
+          "description": "Chapter number."
+        },
+        "verse": {
+          "type": "integer",
+          "description": "Starting verse number."
+        },
+        "reference": {
+          "type": "string",
+          "description": "Human-readable verse or verse-range reference.",
+          "minLength": 3,
+          "maxLength": 60
+        },
+        "verseText": {
+          "type": "string",
+          "description": "Verbatim verse text from the scripture API.",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "translation": {
+          "type": "string",
+          "description": "Source translation of the verse.",
+          "enum": ["BSB", "WEB"]
+        },
+        "noteKind": {
+          "type": "string",
+          "description": "Whether the entry is a study note or prayer.",
+          "enum": ["note", "prayer"]
+        },
+        "noteText": {
+          "type": "string",
+          "description": "User-authored note or prayer text.",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the note or prayer was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the note or prayer was last updated."
+        }
+      },
+      "required": [
+        "verseKey",
+        "ownerId",
+        "bookId",
+        "bookName",
+        "chapter",
+        "verse",
+        "reference",
+        "verseText",
+        "translation",
+        "noteKind",
+        "noteText",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserReadingState" },
-      "description": "User reading progress and preferred translation document."
+      "description": "User reading progress, grouping preference, streaks, and preferred translation document."
     },
     "/users/{userId}/likes/{verseKey}": {
       "schema": { "$ref": "#/entities/SavedVerse" },
@@ -140,6 +290,14 @@
     "/users/{userId}/bookmarks/{verseKey}": {
       "schema": { "$ref": "#/entities/SavedVerse" },
       "description": "Verses bookmarked by the user."
+    },
+    "/users/{userId}/notes/{verseKey}": {
+      "schema": { "$ref": "#/entities/VerseNote" },
+      "description": "Personal notes and prayers saved on scripture verses by the user."
+    },
+    "/users/{userId}/readBooks/{bookId}": {
+      "schema": { "$ref": "#/entities/BookReadProgress" },
+      "description": "Per-book map of canonical verse IDs (e.g. GEN-1-1) marked as read after 1.5s dwell."
     }
   }
 }

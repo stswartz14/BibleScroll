@@ -7,7 +7,8 @@ interface WaveBookScrubberProps {
 }
 
 const TOTAL_BOOKS = BIBLE_BOOKS.length;
-const CANCEL_PULL_RIGHT_PX = 76;
+const CANCEL_SCREEN_WIDTH_RATIO = 0.25;
+const BASE_WAVE_APEX_PX = 26;
 
 export function WaveBookScrubber({ currentBookId, onSelectBook }: WaveBookScrubberProps) {
   const stripRef = useRef<HTMLDivElement | null>(null);
@@ -15,6 +16,7 @@ export function WaveBookScrubber({ currentBookId, onSelectBook }: WaveBookScrubb
   const [isCancelled, setIsCancelled] = useState(false);
   const [hoverFloatIndex, setHoverFloatIndex] = useState<number | null>(null);
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  const [waveApexPx, setWaveApexPx] = useState<number>(BASE_WAVE_APEX_PX);
   const [bubbleTopPx, setBubbleTopPx] = useState<number>(120);
   const [bubbleLeftPx, setBubbleLeftPx] = useState<number>(56);
 
@@ -24,7 +26,14 @@ export function WaveBookScrubber({ currentBookId, onSelectBook }: WaveBookScrubb
     const rect = el.getBoundingClientRect();
     if (rect.height <= 0) return { picked: null as BibleBook | null, cancelled: false };
 
-    const cancelled = clientX - rect.left > CANCEL_PULL_RIGHT_PX;
+    const viewportWidth = window.innerWidth || 390;
+    const cancelThresholdPx = viewportWidth * CANCEL_SCREEN_WIDTH_RATIO;
+    const pullX = Math.max(0, clientX - rect.left);
+    const cancelled = pullX > cancelThresholdPx;
+    const currentApexPx = cancelled
+      ? 0
+      : Math.max(BASE_WAVE_APEX_PX, Math.min(cancelThresholdPx, pullX));
+
     const clampedRatio = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
     const floatIdx = clampedRatio * (TOTAL_BOOKS - 1);
     const nearestIdx = Math.round(floatIdx);
@@ -32,6 +41,7 @@ export function WaveBookScrubber({ currentBookId, onSelectBook }: WaveBookScrubb
     setIsCancelled(cancelled);
     setHoverFloatIndex(floatIdx);
     setActiveIndex(nearestIdx);
+    setWaveApexPx(currentApexPx);
 
     // Clamp pill position in viewport pixels so it stays readable and clear of the thumb
     const rawY = rect.top + clampedRatio * rect.height;
@@ -40,8 +50,8 @@ export function WaveBookScrubber({ currentBookId, onSelectBook }: WaveBookScrubb
     setBubbleTopPx(Math.max(minY, Math.min(maxY, rawY)));
 
     const safeLeft = Math.min(
-      Math.max(56, clientX + 26),
-      Math.max(56, window.innerWidth - 190),
+      Math.max(56, currentApexPx + 24, clientX + 26),
+      Math.max(56, viewportWidth - 190),
     );
     setBubbleLeftPx(safeLeft);
 
@@ -56,6 +66,7 @@ export function WaveBookScrubber({ currentBookId, onSelectBook }: WaveBookScrubb
     setIsCancelled(false);
     setHoverFloatIndex(null);
     setActiveIndex(null);
+    setWaveApexPx(BASE_WAVE_APEX_PX);
   };
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -98,7 +109,7 @@ export function WaveBookScrubber({ currentBookId, onSelectBook }: WaveBookScrubb
     <div
       ref={stripRef}
       role="slider"
-      aria-label="Quick scrub through the 66 books of the Bible. Slide right to cancel."
+      aria-label="Quick scrub through the 66 books of the Bible. Slide 25% right to cancel."
       aria-valuemin={1}
       aria-valuemax={TOTAL_BOOKS}
       aria-valuenow={(activeIndex ?? BIBLE_BOOKS.findIndex((b) => b.id === currentBookId)) + 1}
@@ -132,9 +143,9 @@ export function WaveBookScrubber({ currentBookId, onSelectBook }: WaveBookScrubb
 
         if (isDragging && !isCancelled && hoverFloatIndex !== null) {
           const dist = Math.abs(idx - hoverFloatIndex);
-          // Smooth curved wave outward toward the right (~26px at apex)
+          // Smooth curved wave outward toward the right, extending up to 25% screen width before snap-back
           const wave = Math.exp(-(dist * dist) / 14);
-          translateX = wave * 26;
+          translateX = wave * waveApexPx;
           scale = 1 + wave * 0.95;
           opacity = Math.max(0.32, (isNT ? 0.45 : 0.34) + wave * 0.65);
           if (isActive) {

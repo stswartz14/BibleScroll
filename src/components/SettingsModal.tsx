@@ -1,5 +1,7 @@
-import { Check, Cloud, LogIn, LogOut, X } from 'lucide-react';
+import { useState } from 'react';
+import { Check, Cloud, Download, LogIn, LogOut, X } from 'lucide-react';
 import type { User } from 'firebase/auth';
+import { usePWAInstall } from '../hooks/usePWAInstall';
 import type { TranslationCode } from '../services/scriptureApi';
 
 interface SettingsModalProps {
@@ -42,6 +44,9 @@ export function SettingsModal({
   onSignIn,
   onSignOut,
 }: SettingsModalProps) {
+  const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
+  const [showIOSGuide, setShowIOSGuide] = useState(false);
+
   if (!isOpen) return null;
 
   return (
@@ -191,6 +196,52 @@ export function SettingsModal({
               </div>
             )}
           </section>
+
+          {/* In-App PWA Install */}
+          {!isInstalled && (isInstallable || isIOS) && (
+            <>
+              <div className="h-px bg-white/10" aria-hidden="true" />
+              <section className="space-y-2.5">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-xs font-semibold tracking-wide text-[#D4AF37]">
+                      Install BibleScroll
+                    </h3>
+                    <p className="text-xs text-[#9CA8A2] mt-0.5">
+                      Launch full-screen directly from your home screen.
+                    </p>
+                  </div>
+
+                  {isInstallable ? (
+                    <button
+                      type="button"
+                      onClick={() => void install()}
+                      className="min-h-[44px] px-3.5 rounded-xl bg-[#D4AF37]/15 border border-[#D4AF37]/40 text-xs font-semibold text-[#D4AF37] hover:bg-[#D4AF37]/25 flex items-center gap-2 whitespace-nowrap shrink-0 transition-colors"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Install</span>
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setShowIOSGuide((v) => !v)}
+                      className="min-h-[44px] px-3.5 rounded-xl bg-[#D4AF37]/15 border border-[#D4AF37]/40 text-xs font-semibold text-[#D4AF37] hover:bg-[#D4AF37]/25 flex items-center gap-2 whitespace-nowrap shrink-0 transition-colors"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>How to Install</span>
+                    </button>
+                  )}
+                </div>
+
+                {showIOSGuide && isIOS && !isInstallable && (
+                  <p className="rounded-xl bg-[#0F1312] border border-white/10 p-3 text-xs text-[#9CA8A2] leading-relaxed">
+                    Tap <strong className="text-[#F5F2EA]">Share</strong> in Safari, then choose{' '}
+                    <strong className="text-[#F5F2EA]">Add to Home Screen</strong>.
+                  </p>
+                )}
+              </section>
+            </>
+          )}
         </div>
       </div>
     </div>

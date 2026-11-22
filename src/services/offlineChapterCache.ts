@@ -182,3 +182,56 @@ export async function persistChapter(cacheKey: string, data: ChapterData): Promi
     }
   });
 }
+
+function getAllLocalStorageFallbacks(prefixFilter?: string): ChapterData[] {
+  const results: ChapterData[] = [];
+  try {
+    if (typeof localStorage === 'undefined') return results;
+    const rawIndex = localStorage.getItem(FALLBACK_INDEX_KEY);
+    if (!rawIndex) return results;
+    const indexList = JSON.parse(rawIndex) as string[];
+    if (!Array.isArray(indexList)) return results;
+    for (const cacheKey of indexList) {
+      if (prefixFilter && !cacheKey.startsWith(prefixFilter)) continue;
+      const chapter = getLocalStorageFallback(cacheKey);
+      if (chapter) results.push(chapter);
+    }
+  } catch {
+    // Ignore parse errors
+  }
+  return results;
+}
+
+export async function listAllPersistedChapters(translationPrefix?: string): Promise<ChapterData[]> {
+  const db = await openOfflineDb();
+  if (!db) {
+    return getAllLocalStorageFallbacks(translationPrefix);
+  }
+
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction(STORE_NAME, 'readonly');
+      const store = tx.objectStore(STORE_NAME);
+      const req = store.getAll();
+      req.onsuccess = () => {
+        const entries = Array.isArray(req.result) ? (req.result as PersistedChapterEntry[]) : [];
+        const chapters: ChapterData[] = [];
+        for (const entry of entries) {
+          if (translationPrefix && !entry.cacheKey?.startsWith(translationPrefix)) {
+            continue;
+          }
+          if (entry?.data && Array.isArray(entry.data.verses) && entry.data.verses.length > 0) {
+            chapters.push(entry.data);
+          }
+        }
+        resolve(chapters.length > 0 ? chapters : getAllLocalStorageFallbacks(translationPrefix));
+      };
+      req.onerror = () => {
+        resolve(getAllLocalStorageFallbacks(translationPrefix));
+      };
+    } catch {
+      resolve(getAllLocalStorageFallbacks(translationPrefix));
+    }
+  });
+}
+

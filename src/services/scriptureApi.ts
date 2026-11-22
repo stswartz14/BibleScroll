@@ -3,9 +3,72 @@ import {
   getNextChapterLocation,
   getPreviousChapterLocation,
 } from '../data/bibleBooks';
-import { getPersistedChapter, persistChapter } from './offlineChapterCache';
+import {
+  getPersistedChapter,
+  listAllPersistedChapters,
+  persistChapter,
+} from './offlineChapterCache';
 
-export type TranslationCode = 'BSB' | 'WEB';
+import {
+  fetchApiBibleChapter,
+  type ApiBibleTranslationCode,
+} from './apiBible';
+
+export type TranslationCode = 'BSB' | 'WEB' | 'NLT' | 'NASB' | 'CEV';
+
+export function isApiBibleTranslation(
+  translation: TranslationCode,
+): translation is ApiBibleTranslationCode {
+  return translation === 'NLT' || translation === 'NASB' || translation === 'CEV';
+}
+
+export const TRANSLATION_NAMES: Record<TranslationCode, string> = {
+  BSB: 'Berean Standard Bible (BSB)',
+  WEB: 'World English Bible (WEB)',
+  NLT: 'New Living Translation (NLT)',
+  NASB: 'New American Standard Bible 2020 (NASB)',
+  CEV: 'Contemporary English Version (CEV)',
+};
+
+export interface TranslationOption {
+  code: TranslationCode;
+  name: string;
+  source: string;
+  requiresApiBibleKey: boolean;
+}
+
+export const TRANSLATION_OPTIONS: TranslationOption[] = [
+  {
+    code: 'BSB',
+    name: 'Berean Standard Bible',
+    source: 'Free Use Bible API · Default',
+    requiresApiBibleKey: false,
+  },
+  {
+    code: 'WEB',
+    name: 'World English Bible',
+    source: 'Bible-API Public Domain',
+    requiresApiBibleKey: false,
+  },
+  {
+    code: 'NLT',
+    name: 'New Living Translation',
+    source: 'API.Bible',
+    requiresApiBibleKey: true,
+  },
+  {
+    code: 'NASB',
+    name: 'New American Standard Bible (2020)',
+    source: 'API.Bible',
+    requiresApiBibleKey: true,
+  },
+  {
+    code: 'CEV',
+    name: 'Contemporary English Version',
+    source: 'API.Bible',
+    requiresApiBibleKey: true,
+  },
+];
 
 export interface VerseItem {
   verse: number;
@@ -75,6 +138,30 @@ export function getCachedChapter(
   chapter: number,
 ): ChapterData | undefined {
   return chapterSessionCache.get(makeCacheKey(translation, bookId, chapter));
+}
+
+export async function getAllOfflineCachedChapters(
+  translation: TranslationCode,
+): Promise<ChapterData[]> {
+  const prefix = `${translation}:`;
+  const byKey = new Map<string, ChapterData>();
+
+  for (const [key, data] of chapterSessionCache.entries()) {
+    if (key.startsWith(prefix)) {
+      byKey.set(key, data);
+    }
+  }
+
+  const persisted = await listAllPersistedChapters(prefix);
+  for (const data of persisted) {
+    const key = makeCacheKey(data.translation, data.bookId, data.chapter);
+    if (!byKey.has(key)) {
+      chapterSessionCache.set(key, data);
+      byKey.set(key, data);
+    }
+  }
+
+  return Array.from(byKey.values());
 }
 
 function isSentenceComplete(text: string): boolean {
@@ -200,9 +287,10 @@ export async function fetchChapter(params: {
   translation: TranslationCode;
   bookId: string;
   chapter: number;
+  apiKey?: string;
   signal?: AbortSignal;
 }): Promise<ChapterData> {
-  const { translation, bookId, chapter, signal } = params;
+  const { translation, bookId, chapter, apiKey, signal } = params;
   const book = getBookById(bookId);
   const safeChapter = Math.max(1, Math.min(chapter, book.chapters));
   const cacheKey = makeCacheKey(translation, book.id, safeChapter);
@@ -224,7 +312,15 @@ export async function fetchChapter(params: {
 
   let verses: VerseItem[] = [];
 
-  if (translation === 'BSB') {
+  if (isApiBibleTranslation(translation)) {
+    verses = await fetchApiBibleChapter({
+      translation,
+      bookId: book.id,
+      chapter: safeChapter,
+      apiKey: apiKey ?? '',
+      signal,
+    });
+  } else if (translation === 'BSB') {
     const url = `https://bible.helloao.org/api/BSB/${encodeURIComponent(book.id)}/${safeChapter}.simple.json`;
     const response = await fetch(url, { signal });
     if (!response.ok) {
@@ -318,6 +414,7 @@ async function prefetchSingleChapter(
   translation: TranslationCode,
   bookId: string,
   chapter: number,
+  apiKey?: string,
 ): Promise<void> {
   const cacheKey = makeCacheKey(translation, bookId, chapter);
 
@@ -335,12 +432,17 @@ async function prefetchSingleChapter(
     return;
   }
 
+  if (isApiBibleTranslation(translation) && !apiKey?.trim()) {
+    return;
+  }
+
   inflightPrefetchKeys.add(cacheKey);
   try {
     await fetchChapter({
       translation,
       bookId,
       chapter,
+      apiKey,
     });
   } catch {
     // Silent background prefetch failure when offline or throttled
@@ -353,16 +455,17 @@ export async function prefetchUpcomingChapters(params: {
   translation: TranslationCode;
   bookId: string;
   chapter: number;
+  apiKey?: string;
   count?: number;
   includePrevious?: boolean;
 }): Promise<void> {
-  const { translation, bookId, chapter, count = 2, includePrevious = true } = params;
+  const { translation, bookId, chapter, apiKey, count = 2, includePrevious = true } = params;
 
   // Quietly warm the immediately preceding chapter (crosses book boundaries too)
   if (includePrevious) {
     const prevLoc = getPreviousChapterLocation(bookId, chapter);
     if (prevLoc) {
-      await prefetchSingleChapter(translation, prevLoc.bookId, prevLoc.chapter);
+      await prefetchSingleChapter(translation, prevLoc.bookId, prevLoc.chapter, apiKey);
     }
   }
 
@@ -375,6 +478,6 @@ export async function prefetchUpcomingChapters(params: {
 
     cursorBookId = nextLoc.bookId;
     cursorChapter = nextLoc.chapter;
-    await prefetchSingleChapter(translation, nextLoc.bookId, nextLoc.chapter);
+    await prefetchSingleChapter(translation, nextLoc.bookId, nextLoc.chapter, apiKey);
   }
 }

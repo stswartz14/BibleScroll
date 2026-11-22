@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, ChevronLeft, Search, X } from 'lucide-react';
 import { BIBLE_BOOKS, type BibleBook, type Testament } from '../data/bibleBooks';
 import {
@@ -29,6 +29,16 @@ export function BooksDrawer({
   const [searchQuery, setSearchQuery] = useState('');
   const [testamentFilter, setTestamentFilter] = useState<'ALL' | Testament>('ALL');
   const [selectedBook, setSelectedBook] = useState<BibleBook | null>(null);
+  const currentBookRowRef = useRef<HTMLButtonElement | null>(null);
+  const currentChapterBtnRef = useRef<HTMLButtonElement | null>(null);
+
+  // Reset search/filter when opening so the active book is always visible and centered
+  useEffect(() => {
+    if (!isOpen) return;
+    setSearchQuery('');
+    setTestamentFilter('ALL');
+    setSelectedBook(null);
+  }, [isOpen]);
 
   const filteredBooks = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -40,6 +50,30 @@ export function BooksDrawer({
       return book.name.toLowerCase().includes(q) || book.id.toLowerCase().includes(q);
     });
   }, [searchQuery, testamentFilter]);
+
+  // Automatically scroll the active book into the center of the book list when opened or returning to All Books
+  useEffect(() => {
+    if (!isOpen || selectedBook || searchQuery.trim().length > 0) return;
+    const rafId = requestAnimationFrame(() => {
+      currentBookRowRef.current?.scrollIntoView({
+        block: 'center',
+        behavior: 'auto',
+      });
+    });
+    return () => cancelAnimationFrame(rafId);
+  }, [isOpen, selectedBook, currentBookId, testamentFilter, searchQuery]);
+
+  // Automatically scroll the active chapter into view when inspecting the current book's chapters
+  useEffect(() => {
+    if (!isOpen || !selectedBook || selectedBook.id !== currentBookId) return;
+    const rafId = requestAnimationFrame(() => {
+      currentChapterBtnRef.current?.scrollIntoView({
+        block: 'center',
+        behavior: 'auto',
+      });
+    });
+    return () => cancelAnimationFrame(rafId);
+  }, [isOpen, selectedBook, currentBookId, currentChapter]);
 
   if (!isOpen) return null;
 
@@ -136,7 +170,9 @@ export function BooksDrawer({
                 return (
                   <button
                     key={ch}
+                    ref={isActive ? currentChapterBtnRef : undefined}
                     type="button"
+                    aria-current={isActive ? 'true' : undefined}
                     onClick={() => {
                       onSelectChapter(selectedBook, ch);
                       setSelectedBook(null);
@@ -244,10 +280,14 @@ export function BooksDrawer({
                   return (
                     <button
                       key={book.id}
+                      ref={isCurrent ? currentBookRowRef : undefined}
                       type="button"
+                      aria-current={isCurrent ? 'true' : undefined}
                       onClick={() => setSelectedBook(book)}
-                      className={`w-full min-h-[58px] px-5 py-3 flex flex-col justify-center gap-1.5 text-left transition-colors hover:bg-white/[0.04] ${
-                        isCurrent ? 'bg-[#D4AF37]/10' : ''
+                      className={`w-full min-h-[58px] pr-5 py-3 flex flex-col justify-center gap-1.5 text-left transition-colors ${
+                        isCurrent
+                          ? 'pl-[17px] border-l-[3px] border-l-[#D4AF37] bg-[#D4AF37]/15 hover:bg-[#D4AF37]/20'
+                          : 'pl-5 hover:bg-white/[0.04]'
                       }`}
                     >
                       <div className="w-full flex items-center justify-between gap-3">
@@ -266,6 +306,11 @@ export function BooksDrawer({
                           >
                             {book.testament}
                           </span>
+                          {isCurrent && (
+                            <span className="text-[11px] font-medium text-[#D4AF37]/90 tabular-nums shrink-0">
+                              · Ch {currentChapter}
+                            </span>
+                          )}
                         </div>
 
                         <div className="flex items-center gap-2 text-xs text-[#9CA8A2] tabular-nums shrink-0">

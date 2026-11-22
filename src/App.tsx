@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  ArrowLeft,
   BarChart3,
   BookOpen,
   Bookmark,
@@ -9,6 +10,7 @@ import {
   Menu,
   NotebookPen,
   RefreshCw,
+  Search,
   Settings,
   Undo2,
 } from 'lucide-react';
@@ -23,15 +25,29 @@ import {
 } from './data/bibleBooks';
 import { computeBibleReadStats, makeReadVerseId } from './data/bibleChapterVerseCounts';
 import { getBookSectionTheme } from './data/bookThemes';
+import { getBookOverview, type BookOverview } from './data/bookOverviews';
+import { isRedLetterVerse } from './data/redLetterVerses';
 import {
   buildVerseCards,
   fetchChapter,
   getCachedChapter,
+  isApiBibleTranslation,
   prefetchUpcomingChapters,
+  TRANSLATION_NAMES,
   type ChapterData,
   type TranslationCode,
   type VerseCardItem,
 } from './services/scriptureApi';
+import {
+  ApiBibleAuthError,
+  ApiBibleMissingKeyError,
+  ApiBibleTranslationUnavailableError,
+  clearCachedApiBibleIds,
+  getCachedApiBibleIds,
+  resolveApiBibleIds,
+  type ApiBibleTranslationCode,
+  type ResolvedApiBibleIds,
+} from './services/apiBible';
 import {
   auth,
   checkRedirectSignIn,
@@ -43,6 +59,7 @@ import {
   buildVerseNoteRecord,
   cardToSavedRecord,
   deleteCloudVerseNote,
+  loadGuestApiBibleKey,
   loadGuestBookmarks,
   loadGuestLikes,
   loadGuestNotes,
@@ -51,7 +68,9 @@ import {
   loadGuestStreak,
   markBookVersesReadInCloud,
   mergeGuestDataIntoFirestore,
+  sanitizeApiBibleKey,
   saveCloudVerseNote,
+  saveGuestApiBibleKey,
   saveGuestBookmarks,
   saveGuestLikes,
   saveGuestNotes,
@@ -60,22 +79,49 @@ import {
   saveGuestStreak,
   subscribeUserCloudData,
   toggleCloudSavedRecord,
+  updateCloudApiBibleKey,
   updateCloudReadingState,
   updateCloudStreak,
+  type FontFamilyOption,
   type NoteKind,
   type ReadingState,
   type SavedVerseRecord,
   type StreakStats,
+  type TextSizeOption,
   type VerseNoteRecord,
 } from './services/userStore';
 import { VerseCard } from './components/VerseCard';
+import { BookOverviewCard } from './components/BookOverviewCard';
 import { WaveBookScrubber } from './components/WaveBookScrubber';
 import { BooksDrawer } from './components/BooksDrawer';
 import { BookmarksModal } from './components/BookmarksModal';
 import { NotesModal } from './components/NotesModal';
-import { SettingsModal } from './components/SettingsModal';
+import { SearchModal } from './components/SearchModal';
+import { SettingsModal, type SaveApiBibleKeyResult } from './components/SettingsModal';
 import { StatsModal } from './components/StatsModal';
+import { TranslationPickerModal } from './components/TranslationPickerModal';
 import { VerseNoteModal, type VerseNoteTarget } from './components/VerseNoteModal';
+
+interface JumpLocation {
+  bookId: string;
+  bookName: string;
+  chapter: number;
+  verse: number;
+}
+
+type FeedItem =
+  | {
+      kind: 'overview';
+      id: string;
+      book: BibleBook;
+      overview: BookOverview;
+    }
+  | {
+      kind: 'verse';
+      id: string;
+      card: VerseCardItem;
+      verseCardIndex: number;
+    };
 
 export default function App() {
   const [readingState, setReadingState] = useState<ReadingState>(() => loadGuestReadingState());
@@ -88,6 +134,10 @@ export default function App() {
     loadGuestReadVerses(),
   );
   const [streakStats, setStreakStats] = useState<StreakStats>(() => loadGuestStreak());
+  const [apiBibleKey, setApiBibleKey] = useState<string>(() => loadGuestApiBibleKey());
+  const [resolvedApiBibleIds, setResolvedApiBibleIds] = useState<ResolvedApiBibleIds | null>(() =>
+    getCachedApiBibleIds(loadGuestApiBibleKey()),
+  );
 
   const [chapterData, setChapterData] = useState<ChapterData | null>(() => {
     const initial = loadGuestReadingState();
@@ -100,9 +150,14 @@ export default function App() {
   const [activeCardIndex, setActiveCardIndex] = useState<number>(0);
   const [isMenuOpen, setIsMenuOpen] = useState<boolean>(false);
   const [isBooksOpen, setIsBooksOpen] = useState<boolean>(false);
+  const [isSearchOpen, setIsSearchOpen] = useState<boolean>(false);
   const [isBookmarksOpen, setIsBookmarksOpen] = useState<boolean>(false);
   const [isNotesOpen, setIsNotesOpen] = useState<boolean>(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
+  const [settingsFocusApiKey, setSettingsFocusApiKey] = useState<boolean>(false);
+  const [settingsMissingKeyFor, setSettingsMissingKeyFor] =
+    useState<ApiBibleTranslationCode | null>(null);
+  const [isTranslationPickerOpen, setIsTranslationPickerOpen] = useState<boolean>(false);
   const [isStatsOpen, setIsStatsOpen] = useState<boolean>(false);
   const [noteModalTarget, setNoteModalTarget] = useState<VerseNoteTarget | null>(null);
   const [isDocumentVisible, setIsDocumentVisible] = useState<boolean>(() =>
@@ -116,18 +171,21 @@ export default function App() {
 
   const [copiedCardId, setCopiedCardId] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
-  const [jumpHistory, setJumpHistory] = useState<
-    Array<{ bookId: string; bookName: string; chapter: number; verse: number }>
-  >([]);
+  const [jumpHistory, setJumpHistory] = useState<JumpLocation[]>([]);
+  const [searchReturnSpot, setSearchReturnSpot] = useState<JumpLocation | null>(null);
 
   const feedRef = useRef<HTMLDivElement | null>(null);
   const pendingTargetVerseRef = useRef<number | null>(readingState.verse);
+  const pendingSkipOverviewRef = useRef<boolean>(readingState.verse > 1);
+  const searchReturnTimerRef = useRef<number | null>(null);
   const readingStateRef = useRef<ReadingState>(readingState);
   readingStateRef.current = readingState;
   const readVersesMapRef = useRef<Record<string, boolean>>(readVersesMap);
   readVersesMapRef.current = readVersesMap;
   const streakStatsRef = useRef<StreakStats>(streakStats);
   streakStatsRef.current = streakStats;
+  const apiBibleKeyRef = useRef<string>(apiBibleKey);
+  apiBibleKeyRef.current = apiBibleKey;
 
   const touchGestureRef = useRef<{
     startX: number;
@@ -163,6 +221,14 @@ export default function App() {
     const timer = window.setTimeout(() => setCopiedCardId(null), 1800);
     return () => window.clearTimeout(timer);
   }, [copiedCardId]);
+
+  useEffect(() => {
+    return () => {
+      if (searchReturnTimerRef.current !== null) {
+        window.clearTimeout(searchReturnTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const handleVisibility = () => {
@@ -201,6 +267,9 @@ export default function App() {
         setNotesMap(loadGuestNotes());
         setReadVersesMap(loadGuestReadVerses());
         setStreakStats(loadGuestStreak());
+        const guestKey = loadGuestApiBibleKey();
+        setApiBibleKey(guestKey);
+        setResolvedApiBibleIds(getCachedApiBibleIds(guestKey));
         return;
       }
 
@@ -211,29 +280,59 @@ export default function App() {
         const guestNotes = loadGuestNotes();
         const guestReadVerses = loadGuestReadVerses();
         const guestStreak = streakStatsRef.current;
+        const guestApiBibleKey = apiBibleKeyRef.current;
 
-        const { state: resolvedState, streak: resolvedStreak } =
-          await mergeGuestDataIntoFirestore(
-            nextUser.uid,
-            guestState,
-            guestLikes,
-            guestBookmarks,
-            guestNotes,
-            guestReadVerses,
-            guestStreak,
-          );
+        const {
+          state: resolvedState,
+          streak: resolvedStreak,
+          apiBibleKey: resolvedKey,
+        } = await mergeGuestDataIntoFirestore(
+          nextUser.uid,
+          guestState,
+          guestLikes,
+          guestBookmarks,
+          guestNotes,
+          guestReadVerses,
+          guestStreak,
+          guestApiBibleKey,
+        );
 
         setStreakStats(resolvedStreak);
         saveGuestStreak(resolvedStreak);
+
+        if (resolvedKey !== apiBibleKeyRef.current) {
+          setApiBibleKey(resolvedKey);
+          saveGuestApiBibleKey(resolvedKey);
+          const cachedIds = getCachedApiBibleIds(resolvedKey);
+          setResolvedApiBibleIds(cachedIds);
+          if (resolvedKey && !cachedIds) {
+            void resolveApiBibleIds(resolvedKey)
+              .then((ids) => setResolvedApiBibleIds(ids))
+              .catch(() => {
+                // Silent background resolution; surfaces on chapter fetch if needed
+              });
+          }
+        }
 
         if (
           resolvedState.bookId !== guestState.bookId ||
           resolvedState.chapter !== guestState.chapter ||
           resolvedState.verse !== guestState.verse ||
           resolvedState.translation !== guestState.translation ||
-          resolvedState.smartGrouping !== guestState.smartGrouping
+          resolvedState.smartGrouping !== guestState.smartGrouping ||
+          resolvedState.textSize !== guestState.textSize ||
+          resolvedState.fontFamily !== guestState.fontFamily ||
+          resolvedState.redLetter !== guestState.redLetter
         ) {
-          pendingTargetVerseRef.current = resolvedState.verse;
+          const locationOrLayoutChanged =
+            resolvedState.bookId !== guestState.bookId ||
+            resolvedState.chapter !== guestState.chapter ||
+            resolvedState.verse !== guestState.verse ||
+            resolvedState.translation !== guestState.translation ||
+            resolvedState.smartGrouping !== guestState.smartGrouping;
+          if (locationOrLayoutChanged) {
+            pendingTargetVerseRef.current = resolvedState.verse;
+          }
           setReadingState(resolvedState);
           saveGuestReadingState(resolvedState);
         }
@@ -241,13 +340,20 @@ export default function App() {
         unsubCloud = subscribeUserCloudData(nextUser.uid, {
           onReadingState: (cloudState) => {
             const cur = readingStateRef.current;
-            if (
+            const locationOrLayoutChanged =
               cloudState.bookId !== cur.bookId ||
               cloudState.chapter !== cur.chapter ||
               cloudState.translation !== cur.translation ||
-              cloudState.smartGrouping !== cur.smartGrouping
-            ) {
-              pendingTargetVerseRef.current = cloudState.verse;
+              cloudState.smartGrouping !== cur.smartGrouping;
+            const displayChanged =
+              cloudState.textSize !== cur.textSize ||
+              cloudState.fontFamily !== cur.fontFamily ||
+              cloudState.redLetter !== cur.redLetter;
+
+            if (locationOrLayoutChanged || displayChanged) {
+              if (locationOrLayoutChanged) {
+                pendingTargetVerseRef.current = cloudState.verse;
+              }
               setReadingState(cloudState);
               saveGuestReadingState(cloudState);
             }
@@ -255,6 +361,21 @@ export default function App() {
           onStreak: (cloudStreak) => {
             setStreakStats(cloudStreak);
             saveGuestStreak(cloudStreak);
+          },
+          onApiBibleKey: (cloudKey) => {
+            if (cloudKey !== apiBibleKeyRef.current) {
+              setApiBibleKey(cloudKey);
+              saveGuestApiBibleKey(cloudKey);
+              const cachedIds = getCachedApiBibleIds(cloudKey);
+              setResolvedApiBibleIds(cachedIds);
+              if (cloudKey && !cachedIds) {
+                void resolveApiBibleIds(cloudKey)
+                  .then((ids) => setResolvedApiBibleIds(ids))
+                  .catch(() => {
+                    // Silent background resolution
+                  });
+              }
+            }
           },
           onLikes: (cloudLikes) => {
             setLikesMap(cloudLikes);
@@ -296,7 +417,13 @@ export default function App() {
       setChapterData(cached);
       setChapterError(null);
       setIsLoadingChapter(false);
-      void prefetchUpcomingChapters({ translation, bookId, chapter, count: 2 });
+      void prefetchUpcomingChapters({
+        translation,
+        bookId,
+        chapter,
+        apiKey: apiBibleKey,
+        count: 2,
+      });
       return () => controller.abort();
     }
 
@@ -307,6 +434,7 @@ export default function App() {
       translation,
       bookId,
       chapter,
+      apiKey: apiBibleKey,
       signal: controller.signal,
     })
       .then((data) => {
@@ -314,59 +442,121 @@ export default function App() {
         setChapterData(data);
         setChapterError(null);
         setIsLoadingChapter(false);
-        void prefetchUpcomingChapters({ translation, bookId, chapter, count: 2 });
+        if (isApiBibleTranslation(translation) && apiBibleKey.trim()) {
+          const updatedIds = getCachedApiBibleIds(apiBibleKey);
+          if (updatedIds) {
+            setResolvedApiBibleIds(updatedIds);
+          }
+        }
+        void prefetchUpcomingChapters({
+          translation,
+          bookId,
+          chapter,
+          apiKey: apiBibleKey,
+          count: 2,
+        });
       })
       .catch((err) => {
         if (controller.signal.aborted) return;
         console.error('Scripture load error:', err);
         setChapterData(null);
-        setChapterError('Unable to load scripture—check connection or switch translation.');
+        if (
+          err instanceof ApiBibleMissingKeyError ||
+          err instanceof ApiBibleAuthError ||
+          err instanceof ApiBibleTranslationUnavailableError
+        ) {
+          setChapterError(err.message);
+        } else {
+          setChapterError('Unable to load scripture—check connection or switch translation.');
+        }
         setIsLoadingChapter(false);
       });
 
     return () => controller.abort();
-  }, [readingState.translation, readingState.bookId, readingState.chapter, reloadNonce]);
+  }, [readingState.translation, readingState.bookId, readingState.chapter, apiBibleKey, reloadNonce]);
 
   const cards = useMemo(
     () => buildVerseCards(chapterData, readingState.smartGrouping),
     [chapterData, readingState.smartGrouping],
   );
 
+  const feedItems = useMemo<FeedItem[]>(() => {
+    if (cards.length === 0) return [];
+    const verseItems: FeedItem[] = cards.map((card, verseCardIndex) => ({
+      kind: 'verse',
+      id: `${card.translation}_${card.id}`,
+      card,
+      verseCardIndex,
+    }));
+
+    if (chapterData?.chapter === 1) {
+      const book = getBookById(chapterData.bookId);
+      return [
+        {
+          kind: 'overview',
+          id: `overview_${book.id}`,
+          book,
+          overview: getBookOverview(book.id),
+        },
+        ...verseItems,
+      ];
+    }
+
+    return verseItems;
+  }, [cards, chapterData?.bookId, chapterData?.chapter]);
+
+  const activeFeedItem = feedItems[activeCardIndex] ?? null;
+  const isOnOverviewCard = activeFeedItem?.kind === 'overview';
+  const activeVerseCardIndex =
+    activeFeedItem?.kind === 'verse' ? activeFeedItem.verseCardIndex : -1;
+
   useEffect(() => {
     lastCardSettledAtRef.current = Date.now();
   }, [activeCardIndex, readingState.bookId, readingState.chapter]);
 
-  // Scroll to target verse card and observe active centered card inside the snap container
+  // Scroll to target verse card (or Book Overview Card) and observe active card in snap container
   useEffect(() => {
     const container = feedRef.current;
-    if (!container || isLoadingChapter || Boolean(chapterError) || cards.length === 0) return;
+    if (!container || isLoadingChapter || Boolean(chapterError) || feedItems.length === 0) return;
 
     const desiredVerse = pendingTargetVerseRef.current ?? 1;
+    const skipOverview = pendingSkipOverviewRef.current;
     pendingTargetVerseRef.current = null;
+    pendingSkipOverviewRef.current = false;
 
-    const targetIdx =
-      desiredVerse === -1
-        ? cards.length - 1
-        : Math.max(
-            0,
-            cards.findIndex((c) => desiredVerse >= c.startVerse && desiredVerse <= c.endVerse),
-          );
+    const hasOverview = feedItems[0]?.kind === 'overview';
+    const overviewOffset = hasOverview ? 1 : 0;
+
+    let targetIdx = 0;
+    if (desiredVerse === -1) {
+      targetIdx = feedItems.length - 1;
+    } else if (hasOverview && !skipOverview && desiredVerse <= 1) {
+      targetIdx = 0;
+    } else {
+      const verseIdx = Math.max(
+        0,
+        cards.findIndex((c) => desiredVerse >= c.startVerse && desiredVerse <= c.endVerse),
+      );
+      targetIdx = overviewOffset + verseIdx;
+    }
+
     setActiveCardIndex(targetIdx);
     lastCardSettledAtRef.current = Date.now();
 
-    const targetCard = cards[targetIdx];
-    if (targetCard) {
+    const targetItem = feedItems[targetIdx];
+    if (targetItem?.kind === 'verse') {
+      const tc = targetItem.card;
       setReadingState((prev) =>
-        prev.verse === targetCard.startVerse &&
-        prev.bookId === targetCard.bookId &&
-        prev.chapter === targetCard.chapter
+        prev.verse === tc.startVerse &&
+        prev.bookId === tc.bookId &&
+        prev.chapter === tc.chapter
           ? prev
           : {
               ...prev,
-              bookId: targetCard.bookId,
-              bookName: targetCard.bookName,
-              chapter: targetCard.chapter,
-              verse: targetCard.startVerse,
+              bookId: tc.bookId,
+              bookName: tc.bookName,
+              chapter: tc.chapter,
+              verse: tc.startVerse,
             },
       );
     }
@@ -396,9 +586,24 @@ export default function App() {
           }
           if (bestEntry) {
             const idx = Number(bestEntry.target.getAttribute('data-card-index'));
-            const activeCard = cards[idx];
-            if (activeCard) {
-              setActiveCardIndex(idx);
+            const item = feedItems[idx];
+            if (!item) return;
+
+            setActiveCardIndex(idx);
+            if (item.kind === 'overview') {
+              setReadingState((prev) =>
+                prev.verse === 1 && prev.bookId === item.book.id && prev.chapter === 1
+                  ? prev
+                  : {
+                      ...prev,
+                      bookId: item.book.id,
+                      bookName: item.book.name,
+                      chapter: 1,
+                      verse: 1,
+                    },
+              );
+            } else {
+              const activeCard = item.card;
               setReadingState((prev) =>
                 prev.verse === activeCard.startVerse &&
                 prev.bookId === activeCard.bookId &&
@@ -428,18 +633,20 @@ export default function App() {
       cancelAnimationFrame(rafId);
       observer?.disconnect();
     };
-  }, [cards, chapterError, isLoadingChapter]);
+  }, [cards, chapterError, feedItems, isLoadingChapter]);
 
-  // Passive 1.5s dwell-time read tracking & daily streak update
+  // Passive 1.5s dwell-time read tracking & daily streak update (verse cards only, excludes overview cards)
   useEffect(() => {
     if (
       isLoadingChapter ||
       Boolean(chapterError) ||
       isMenuOpen ||
       isBooksOpen ||
+      isSearchOpen ||
       isBookmarksOpen ||
       isNotesOpen ||
       isSettingsOpen ||
+      isTranslationPickerOpen ||
       isStatsOpen ||
       Boolean(noteModalTarget) ||
       !isDocumentVisible
@@ -447,8 +654,9 @@ export default function App() {
       return;
     }
 
-    const activeCard = cards[activeCardIndex];
-    if (!activeCard) return;
+    const activeItem = feedItems[activeCardIndex];
+    if (!activeItem || activeItem.kind !== 'verse') return;
+    const activeCard = activeItem.card;
 
     const timer = window.setTimeout(() => {
       const cardVerseIds = activeCard.verses.map((v) =>
@@ -494,16 +702,18 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [
     activeCardIndex,
-    cards,
     chapterError,
+    feedItems,
     isBookmarksOpen,
     isBooksOpen,
     isDocumentVisible,
     isLoadingChapter,
     isMenuOpen,
     isNotesOpen,
+    isSearchOpen,
     isSettingsOpen,
     isStatsOpen,
+    isTranslationPickerOpen,
     noteModalTarget,
     user,
   ]);
@@ -523,7 +733,12 @@ export default function App() {
   }, [readingState, user]);
 
   const navigateToLocation = useCallback(
-    (bookId: string, chapter: number, verse = 1, options?: { recordHistory?: boolean }) => {
+    (
+      bookId: string,
+      chapter: number,
+      verse = 1,
+      options?: { recordHistory?: boolean; skipOverview?: boolean },
+    ) => {
       const book = getBookById(bookId);
       const safeChapter = Math.max(1, Math.min(chapter, book.chapters));
       const cur = readingStateRef.current;
@@ -552,7 +767,43 @@ export default function App() {
         });
       }
 
+      // Same-chapter jump: scroll directly without waiting for chapter fetch effect
+      if (
+        cur.bookId === book.id &&
+        cur.chapter === safeChapter &&
+        !isLoadingChapter &&
+        !chapterError &&
+        feedItems.length > 0
+      ) {
+        const container = feedRef.current;
+        const hasOverview = feedItems[0]?.kind === 'overview';
+        const overviewOffset = hasOverview ? 1 : 0;
+        let targetIdx = 0;
+
+        if (verse === -1) {
+          targetIdx = feedItems.length - 1;
+        } else if (hasOverview && !options?.skipOverview && verse <= 1) {
+          targetIdx = 0;
+        } else {
+          const verseIdx = Math.max(
+            0,
+            cards.findIndex((c) => verse >= c.startVerse && verse <= c.endVerse),
+          );
+          targetIdx = overviewOffset + verseIdx;
+        }
+
+        const targetEl = container?.querySelector<HTMLElement>(
+          `[data-card-index="${targetIdx}"]`,
+        );
+        if (targetEl) {
+          targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+        setActiveCardIndex(targetIdx);
+        return;
+      }
+
       pendingTargetVerseRef.current = verse;
+      pendingSkipOverviewRef.current = Boolean(options?.skipOverview);
       setReadingState((prev) => ({
         ...prev,
         bookId: book.id,
@@ -561,20 +812,37 @@ export default function App() {
         verse: verse === -1 ? 1 : verse,
       }));
     },
-    [],
+    [cards, chapterError, feedItems, isLoadingChapter],
   );
 
   const handleGoBackToPreviousLocation = useCallback(() => {
     const target = jumpHistory[jumpHistory.length - 1];
     if (!target) return;
     setJumpHistory((prev) => prev.slice(0, -1));
-    navigateToLocation(target.bookId, target.chapter, target.verse, { recordHistory: false });
+    navigateToLocation(target.bookId, target.chapter, target.verse, {
+      recordHistory: false,
+      skipOverview: true,
+    });
     showToast(`Returned to ${target.bookName} ${target.chapter}:${target.verse}`);
   }, [jumpHistory, navigateToLocation, showToast]);
 
+  const handleReturnFromSearch = useCallback(() => {
+    if (!searchReturnSpot) return;
+    const spot = searchReturnSpot;
+    if (searchReturnTimerRef.current !== null) {
+      window.clearTimeout(searchReturnTimerRef.current);
+      searchReturnTimerRef.current = null;
+    }
+    setSearchReturnSpot(null);
+    navigateToLocation(spot.bookId, spot.chapter, spot.verse, {
+      recordHistory: false,
+      skipOverview: true,
+    });
+  }, [navigateToLocation, searchReturnSpot]);
+
   const handleSelectChapterFromDrawer = useCallback(
     (book: BibleBook, chapter: number) => {
-      navigateToLocation(book.id, chapter, 1);
+      navigateToLocation(book.id, chapter, 1, { skipOverview: false });
       setIsBooksOpen(false);
     },
     [navigateToLocation],
@@ -582,10 +850,51 @@ export default function App() {
 
   const handleSelectBookFromScrubber = useCallback(
     (book: BibleBook) => {
-      navigateToLocation(book.id, 1, 1);
+      navigateToLocation(book.id, 1, 1, { skipOverview: false });
       showToast(`${book.name} 1`);
     },
     [navigateToLocation, showToast],
+  );
+
+  const handleJumpFromOverview = useCallback(
+    (bookId: string, chapter: number, verse: number) => {
+      navigateToLocation(bookId, chapter, verse, { skipOverview: true });
+    },
+    [navigateToLocation],
+  );
+
+  const handleSelectSearchResult = useCallback(
+    (target: { bookId: string; chapter: number; verse: number }) => {
+      const cur = readingStateRef.current;
+      const isDifferentSpot =
+        cur.bookId !== target.bookId ||
+        cur.chapter !== target.chapter ||
+        cur.verse !== target.verse;
+
+      setIsSearchOpen(false);
+
+      if (isDifferentSpot) {
+        setSearchReturnSpot({
+          bookId: cur.bookId,
+          bookName: cur.bookName,
+          chapter: cur.chapter,
+          verse: cur.verse,
+        });
+        if (searchReturnTimerRef.current !== null) {
+          window.clearTimeout(searchReturnTimerRef.current);
+        }
+        searchReturnTimerRef.current = window.setTimeout(() => {
+          setSearchReturnSpot(null);
+          searchReturnTimerRef.current = null;
+        }, 10_000);
+      }
+
+      navigateToLocation(target.bookId, target.chapter, target.verse, {
+        recordHistory: false,
+        skipOverview: true,
+      });
+    },
+    [navigateToLocation],
   );
 
   const previousChapter = useMemo(
@@ -623,26 +932,26 @@ export default function App() {
   const stepCard = useCallback(
     (delta: -1 | 1) => {
       const container = feedRef.current;
-      if (!container || cards.length === 0) return;
+      if (!container || feedItems.length === 0) return;
 
       if (delta === -1 && activeCardIndex <= 0) {
         goToPreviousChapterAtEnd();
         return;
       }
 
-      if (delta === 1 && activeCardIndex >= cards.length - 1) {
+      if (delta === 1 && activeCardIndex >= feedItems.length - 1) {
         goToNextChapterAtStart();
         return;
       }
 
-      const nextIndex = Math.max(0, Math.min(cards.length - 1, activeCardIndex + delta));
+      const nextIndex = Math.max(0, Math.min(feedItems.length - 1, activeCardIndex + delta));
       if (nextIndex === activeCardIndex) return;
       const targetEl = container.querySelector<HTMLElement>(`[data-card-index="${nextIndex}"]`);
       if (targetEl) {
         targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }
     },
-    [activeCardIndex, cards.length, goToNextChapterAtStart, goToPreviousChapterAtEnd],
+    [activeCardIndex, feedItems.length, goToNextChapterAtStart, goToPreviousChapterAtEnd],
   );
 
   const handleFeedTouchStart = useCallback(
@@ -651,14 +960,16 @@ export default function App() {
         e.touches.length !== 1 ||
         isMenuOpen ||
         isBooksOpen ||
+        isSearchOpen ||
         isBookmarksOpen ||
         isNotesOpen ||
         isSettingsOpen ||
+        isTranslationPickerOpen ||
         isStatsOpen ||
         Boolean(noteModalTarget) ||
         isLoadingChapter ||
         Boolean(chapterError) ||
-        cards.length === 0
+        feedItems.length === 0
       ) {
         touchGestureRef.current = null;
         return;
@@ -674,7 +985,7 @@ export default function App() {
       const cardHeight = container.clientHeight || window.innerHeight || 1;
       const startIndex = Math.max(
         0,
-        Math.min(cards.length - 1, Math.round(container.scrollTop / cardHeight)),
+        Math.min(feedItems.length - 1, Math.round(container.scrollTop / cardHeight)),
       );
 
       touchGestureRef.current = {
@@ -691,15 +1002,17 @@ export default function App() {
       };
     },
     [
-      cards.length,
       chapterError,
+      feedItems.length,
       isBookmarksOpen,
       isBooksOpen,
       isLoadingChapter,
       isMenuOpen,
       isNotesOpen,
+      isSearchOpen,
       isSettingsOpen,
       isStatsOpen,
+      isTranslationPickerOpen,
       noteModalTarget,
     ],
   );
@@ -721,7 +1034,7 @@ export default function App() {
     const gesture = touchGestureRef.current;
     touchGestureRef.current = null;
     const container = feedRef.current;
-    if (!gesture || !container || cards.length === 0) return;
+    if (!gesture || !container || feedItems.length === 0) return;
 
     const now = Date.now();
     const deltaY = gesture.lastY - gesture.startY;
@@ -751,8 +1064,8 @@ export default function App() {
     const isAtFirstCard =
       gesture.startIndex <= 0 || (activeCardIndex <= 0 && gesture.startScrollTop <= 2);
     const isAtLastCard =
-      gesture.startIndex >= cards.length - 1 ||
-      (activeCardIndex >= cards.length - 1 &&
+      gesture.startIndex >= feedItems.length - 1 ||
+      (activeCardIndex >= feedItems.length - 1 &&
         gesture.startScrollTop + container.clientHeight >= container.scrollHeight - 2);
 
     if (direction === -1 && isAtFirstCard) {
@@ -772,7 +1085,7 @@ export default function App() {
     }
 
     const targetIndex = gesture.startIndex + direction;
-    if (targetIndex < 0 || targetIndex >= cards.length) return;
+    if (targetIndex < 0 || targetIndex >= feedItems.length) return;
 
     requestAnimationFrame(() => {
       const currentContainer = feedRef.current;
@@ -790,7 +1103,7 @@ export default function App() {
     });
   }, [
     activeCardIndex,
-    cards.length,
+    feedItems.length,
     goToNextChapterAtStart,
     goToPreviousChapterAtEnd,
     nextChapter,
@@ -806,14 +1119,16 @@ export default function App() {
       if (
         isMenuOpen ||
         isBooksOpen ||
+        isSearchOpen ||
         isBookmarksOpen ||
         isNotesOpen ||
         isSettingsOpen ||
+        isTranslationPickerOpen ||
         isStatsOpen ||
         Boolean(noteModalTarget) ||
         isLoadingChapter ||
         Boolean(chapterError) ||
-        cards.length === 0
+        feedItems.length === 0
       ) {
         return;
       }
@@ -848,7 +1163,7 @@ export default function App() {
 
       const atTopBoundary = activeCardIndex <= 0 && container.scrollTop <= 2;
       const atBottomBoundary =
-        activeCardIndex >= cards.length - 1 &&
+        activeCardIndex >= feedItems.length - 1 &&
         container.scrollTop + container.clientHeight >= container.scrollHeight - 2;
 
       if (e.deltaY < 0 && atTopBoundary && previousChapter) {
@@ -887,8 +1202,8 @@ export default function App() {
     },
     [
       activeCardIndex,
-      cards.length,
       chapterError,
+      feedItems.length,
       goToNextChapterAtStart,
       goToPreviousChapterAtEnd,
       isBookmarksOpen,
@@ -896,17 +1211,29 @@ export default function App() {
       isLoadingChapter,
       isMenuOpen,
       isNotesOpen,
+      isSearchOpen,
       isSettingsOpen,
       isStatsOpen,
+      isTranslationPickerOpen,
       nextChapter,
       noteModalTarget,
       previousChapter,
     ],
   );
 
-  // Keyboard arrow & Escape support
+  // Keyboard arrow, search shortcut (/ or Cmd/Ctrl+K) & Escape support
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && isTranslationPickerOpen) {
+        e.preventDefault();
+        setIsTranslationPickerOpen(false);
+        return;
+      }
+      if (e.key === 'Escape' && isSearchOpen) {
+        e.preventDefault();
+        setIsSearchOpen(false);
+        return;
+      }
       if (e.key === 'Escape' && isMenuOpen) {
         e.preventDefault();
         setIsMenuOpen(false);
@@ -917,15 +1244,29 @@ export default function App() {
         setIsNotesOpen(false);
         return;
       }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setIsMenuOpen(false);
+        setIsTranslationPickerOpen(false);
+        setIsSearchOpen(true);
+        return;
+      }
       if (
         isMenuOpen ||
         isBooksOpen ||
+        isSearchOpen ||
         isBookmarksOpen ||
         isNotesOpen ||
         isSettingsOpen ||
+        isTranslationPickerOpen ||
         isStatsOpen ||
         Boolean(noteModalTarget)
       ) {
+        return;
+      }
+      if (e.key === '/') {
+        e.preventDefault();
+        setIsSearchOpen(true);
         return;
       }
       if (e.key === 'ArrowDown' || e.key === 'PageDown') {
@@ -941,9 +1282,11 @@ export default function App() {
   }, [
     isMenuOpen,
     isBooksOpen,
+    isSearchOpen,
     isBookmarksOpen,
     isNotesOpen,
     isSettingsOpen,
+    isTranslationPickerOpen,
     isStatsOpen,
     noteModalTarget,
     stepCard,
@@ -1112,21 +1455,80 @@ export default function App() {
     (nextTranslation: TranslationCode) => {
       if (nextTranslation === readingState.translation) return;
       pendingTargetVerseRef.current = readingState.verse;
+      pendingSkipOverviewRef.current = !isOnOverviewCard;
       setReadingState((prev) => ({
         ...prev,
         translation: nextTranslation,
       }));
-      showToast(
-        nextTranslation === 'BSB'
-          ? 'Switched to Berean Standard Bible (BSB)'
-          : 'Switched to World English Bible (WEB)',
-      );
+      showToast(`Switched to ${TRANSLATION_NAMES[nextTranslation]}`);
     },
-    [readingState.translation, readingState.verse, showToast],
+    [isOnOverviewCard, readingState.translation, readingState.verse, showToast],
+  );
+
+  const handleSaveApiBibleKey = useCallback(
+    async (nextKey: string): Promise<SaveApiBibleKeyResult> => {
+      const cleaned = sanitizeApiBibleKey(nextKey);
+
+      if (!cleaned) {
+        setApiBibleKey('');
+        saveGuestApiBibleKey('');
+        clearCachedApiBibleIds();
+        setResolvedApiBibleIds(null);
+
+        if (user) {
+          void updateCloudApiBibleKey(user.uid, '', readingStateRef.current).catch((err) => {
+            setCloudError(err instanceof Error ? err : new Error(String(err)));
+          });
+        }
+        return { ok: true };
+      }
+
+      try {
+        const ids = await resolveApiBibleIds(cleaned, { forceRefresh: true });
+        setApiBibleKey(cleaned);
+        saveGuestApiBibleKey(cleaned);
+        setResolvedApiBibleIds(ids);
+
+        if (user) {
+          void updateCloudApiBibleKey(user.uid, cleaned, readingStateRef.current).catch((err) => {
+            setCloudError(err instanceof Error ? err : new Error(String(err)));
+          });
+        }
+
+        if (isApiBibleTranslation(readingStateRef.current.translation)) {
+          setReloadNonce((n) => n + 1);
+        }
+
+        showToast('API.Bible key saved');
+        return { ok: true, resolvedIds: ids };
+      } catch (err) {
+        if (err instanceof ApiBibleAuthError) {
+          return { ok: false, error: err.message };
+        }
+
+        // Offline or transient network issue: save key locally & to cloud so user doesn't lose it
+        setApiBibleKey(cleaned);
+        saveGuestApiBibleKey(cleaned);
+        setResolvedApiBibleIds(getCachedApiBibleIds(cleaned));
+
+        if (user) {
+          void updateCloudApiBibleKey(user.uid, cleaned, readingStateRef.current).catch((e) => {
+            setCloudError(e instanceof Error ? e : new Error(String(e)));
+          });
+        }
+
+        return {
+          ok: true,
+          warning: 'Key saved. Bible IDs will resolve automatically once connected.',
+        };
+      }
+    },
+    [showToast, user],
   );
 
   const handleToggleSmartGrouping = useCallback(() => {
     pendingTargetVerseRef.current = readingState.verse;
+    pendingSkipOverviewRef.current = !isOnOverviewCard;
     const nextGrouping = !readingState.smartGrouping;
     setReadingState((prev) => ({
       ...prev,
@@ -1135,7 +1537,36 @@ export default function App() {
     showToast(
       nextGrouping ? 'Smart Verse Grouping enabled' : 'Single-verse cards enabled',
     );
-  }, [readingState.smartGrouping, readingState.verse, showToast]);
+  }, [isOnOverviewCard, readingState.smartGrouping, readingState.verse, showToast]);
+
+  const handleChangeTextSize = useCallback((nextSize: TextSizeOption) => {
+    setReadingState((prev) =>
+      prev.textSize === nextSize
+        ? prev
+        : {
+            ...prev,
+            textSize: nextSize,
+          },
+    );
+  }, []);
+
+  const handleChangeFontFamily = useCallback((nextFont: FontFamilyOption) => {
+    setReadingState((prev) =>
+      prev.fontFamily === nextFont
+        ? prev
+        : {
+            ...prev,
+            fontFamily: nextFont,
+          },
+    );
+  }, []);
+
+  const handleToggleRedLetter = useCallback(() => {
+    setReadingState((prev) => ({
+      ...prev,
+      redLetter: !prev.redLetter,
+    }));
+  }, []);
 
   const handleGoogleSignIn = useCallback(async () => {
     setAuthLoading(true);
@@ -1162,7 +1593,7 @@ export default function App() {
 
   const handleJumpToSaved = useCallback(
     (record: { bookId: string; chapter: number; verse: number }) => {
-      navigateToLocation(record.bookId, record.chapter, record.verse);
+      navigateToLocation(record.bookId, record.chapter, record.verse, { skipOverview: true });
       setIsBookmarksOpen(false);
       setIsNotesOpen(false);
     },
@@ -1301,17 +1732,19 @@ export default function App() {
 
   const totalCards = cards.length;
   const progressPercent =
-    totalCards > 0 ? Math.min(100, ((activeCardIndex + 1) / totalCards) * 100) : 0;
+    activeVerseCardIndex >= 0 && totalCards > 0
+      ? Math.min(100, ((activeVerseCardIndex + 1) / totalCards) * 100)
+      : 0;
 
   const bibleProgress = useMemo(
     () =>
       getBibleProgressStats(
         readingState.bookId,
         readingState.chapter,
-        activeCardIndex,
+        activeVerseCardIndex,
         totalCards,
       ),
-    [readingState.bookId, readingState.chapter, activeCardIndex, totalCards],
+    [readingState.bookId, readingState.chapter, activeVerseCardIndex, totalCards],
   );
 
   const sectionTheme = useMemo(
@@ -1377,6 +1810,19 @@ export default function App() {
               aria-label="Main menu"
               className="absolute right-0 top-[calc(100%+8px)] z-50 w-52 rounded-2xl bg-[#141917]/95 backdrop-blur-xl border border-white/10 shadow-2xl p-1.5 flex flex-col gap-0.5"
             >
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setIsMenuOpen(false);
+                  setIsSearchOpen(true);
+                }}
+                className="w-full min-h-[44px] px-3 rounded-xl flex items-center gap-3 text-sm font-medium text-[#F5F2EA] hover:bg-white/[0.06] transition-colors whitespace-nowrap"
+              >
+                <Search className="w-4 h-4 text-[#D4AF37]" aria-hidden="true" />
+                <span>Search Scripture</span>
+              </button>
+
               <button
                 type="button"
                 role="menuitem"
@@ -1455,7 +1901,7 @@ export default function App() {
       />
 
       {/* Right-Edge Floating Up/Down Chevrons */}
-      {!isLoadingChapter && !chapterError && totalCards > 0 && (
+      {!isLoadingChapter && !chapterError && feedItems.length > 0 && (
         <div
           aria-label="Verse navigation controls"
           className="fixed right-2.5 sm:right-5 top-1/2 -translate-y-1/2 z-20 flex flex-col items-center gap-2"
@@ -1480,20 +1926,20 @@ export default function App() {
           </button>
 
           <span className="text-[11px] font-medium text-[#9CA8A2] tabular-nums py-0.5">
-            {activeCardIndex + 1}/{totalCards}
+            {isOnOverviewCard ? 'Intro' : `${activeVerseCardIndex + 1}/${totalCards}`}
           </span>
 
           <button
             type="button"
             onClick={() => stepCard(1)}
-            disabled={activeCardIndex >= totalCards - 1 && !nextChapter}
+            disabled={activeCardIndex >= feedItems.length - 1 && !nextChapter}
             aria-label={
-              activeCardIndex >= totalCards - 1 && nextChapter
+              activeCardIndex >= feedItems.length - 1 && nextChapter
                 ? `Go to next chapter (${nextChapter.bookName} ${nextChapter.chapter})`
                 : 'Next card'
             }
             title={
-              activeCardIndex >= totalCards - 1 && nextChapter
+              activeCardIndex >= feedItems.length - 1 && nextChapter
                 ? `Next: ${nextChapter.bookName} ${nextChapter.chapter}`
                 : 'Next card'
             }
@@ -1504,23 +1950,38 @@ export default function App() {
         </div>
       )}
 
-      {/* One-tap Return to Previous Verse after jumping books or chapters */}
-      {jumpHistory.length > 0 && (
+      {/* 10-second Floating Return Pill after jumping from Search */}
+      {searchReturnSpot ? (
         <button
           type="button"
-          onClick={handleGoBackToPreviousLocation}
-          aria-label={`Back to ${jumpHistory[jumpHistory.length - 1].bookName} ${
-            jumpHistory[jumpHistory.length - 1].chapter
-          }:${jumpHistory[jumpHistory.length - 1].verse}`}
-          className="fixed bottom-12 right-3 sm:right-6 z-30 min-h-[40px] px-3.5 py-2 rounded-full bg-[#161B19]/90 backdrop-blur-md border border-[#D4AF37]/40 text-xs font-medium text-[#F5F2EA] hover:border-[#D4AF37] shadow-lg flex items-center gap-2 transition-colors active:scale-[0.97]"
+          onClick={handleReturnFromSearch}
+          aria-label={`Back to ${searchReturnSpot.bookName} ${searchReturnSpot.chapter}:${searchReturnSpot.verse}`}
+          className="fixed bottom-14 left-1/2 -translate-x-1/2 z-30 min-h-[40px] px-4 py-2 rounded-full bg-[#161B19]/95 backdrop-blur-md border border-[#D4AF37]/45 text-xs font-medium text-[#F5F2EA] hover:border-[#D4AF37] shadow-xl flex items-center gap-2 transition-colors active:scale-[0.97]"
         >
-          <Undo2 className="w-3.5 h-3.5 text-[#D4AF37]" aria-hidden="true" />
+          <ArrowLeft className="w-3.5 h-3.5 text-[#D4AF37]" aria-hidden="true" />
           <span className="whitespace-nowrap tabular-nums">
-            Back to {jumpHistory[jumpHistory.length - 1].bookName}{' '}
-            {jumpHistory[jumpHistory.length - 1].chapter}:
-            {jumpHistory[jumpHistory.length - 1].verse}
+            Back to {searchReturnSpot.bookName} {searchReturnSpot.chapter}:
+            {searchReturnSpot.verse}
           </span>
         </button>
+      ) : (
+        jumpHistory.length > 0 && (
+          <button
+            type="button"
+            onClick={handleGoBackToPreviousLocation}
+            aria-label={`Back to ${jumpHistory[jumpHistory.length - 1].bookName} ${
+              jumpHistory[jumpHistory.length - 1].chapter
+            }:${jumpHistory[jumpHistory.length - 1].verse}`}
+            className="fixed bottom-12 right-3 sm:right-6 z-30 min-h-[40px] px-3.5 py-2 rounded-full bg-[#161B19]/90 backdrop-blur-md border border-[#D4AF37]/40 text-xs font-medium text-[#F5F2EA] hover:border-[#D4AF37] shadow-lg flex items-center gap-2 transition-colors active:scale-[0.97]"
+          >
+            <Undo2 className="w-3.5 h-3.5 text-[#D4AF37]" aria-hidden="true" />
+            <span className="whitespace-nowrap tabular-nums">
+              Back to {jumpHistory[jumpHistory.length - 1].bookName}{' '}
+              {jumpHistory[jumpHistory.length - 1].chapter}:
+              {jumpHistory[jumpHistory.length - 1].verse}
+            </span>
+          </button>
+        )
       )}
 
       {/* Main Full-Screen Snap Feed */}
@@ -1576,7 +2037,21 @@ export default function App() {
             </div>
           </div>
         ) : (
-          cards.map((card, idx) => {
+          feedItems.map((item, idx) => {
+            if (item.kind === 'overview') {
+              return (
+                <BookOverviewCard
+                  key={item.id}
+                  book={item.book}
+                  overview={item.overview}
+                  cardIndex={idx}
+                  onJumpToReference={handleJumpFromOverview}
+                  onContinueToChapter={() => stepCard(1)}
+                />
+              );
+            }
+
+            const card = item.card;
             const isLiked = card.verses.some((v) =>
               Boolean(likesMap[makeVerseKey(v.bookId, v.chapter, v.verse)]),
             );
@@ -1588,16 +2063,34 @@ export default function App() {
               Boolean(readVersesMap[makeReadVerseId(v.bookId, v.chapter, v.verse)]),
             );
 
+            const prevVerseCard =
+              item.verseCardIndex > 0 ? cards[item.verseCardIndex - 1] : null;
+            const prevCardLastVerse =
+              prevVerseCard && prevVerseCard.verses.length > 0
+                ? prevVerseCard.verses[prevVerseCard.verses.length - 1]
+                : null;
+            const prevCardLastVerseWasRedLetter =
+              prevCardLastVerse !== null &&
+              isRedLetterVerse(
+                prevCardLastVerse.bookId,
+                prevCardLastVerse.chapter,
+                prevCardLastVerse.verse,
+              );
+
             return (
               <VerseCard
-                key={`${card.translation}_${card.id}`}
+                key={item.id}
                 card={card}
                 cardIndex={idx}
+                textSize={readingState.textSize}
+                fontFamily={readingState.fontFamily}
+                redLetter={readingState.redLetter}
+                prevCardLastVerseWasRedLetter={prevCardLastVerseWasRedLetter}
                 isLiked={isLiked}
                 isBookmarked={isBookmarked}
                 hasNote={hasNote}
                 isRead={isRead}
-                isLastCardInChapter={idx === cards.length - 1}
+                isLastCardInChapter={item.verseCardIndex === cards.length - 1}
                 nextChapterLabel={
                   nextChapter ? `${nextChapter.bookName} ${nextChapter.chapter}` : null
                 }
@@ -1607,6 +2100,7 @@ export default function App() {
                 onShare={handleShare}
                 onCopy={copyCardText}
                 onNextChapter={handleNextChapter}
+                onOpenTranslationPicker={() => setIsTranslationPickerOpen(true)}
                 isCopied={copiedCardId === card.id}
               />
             );
@@ -1620,7 +2114,11 @@ export default function App() {
           <div className="flex items-center justify-between gap-3 text-[10px] font-medium text-[#9CA8A2] tabular-nums">
             <span className="truncate">
               {readingState.bookName} {readingState.chapter}
-              {totalCards > 0 ? ` · ${activeCardIndex + 1}/${totalCards}` : ''}
+              {isOnOverviewCard
+                ? ' · Overview'
+                : totalCards > 0
+                  ? ` · ${activeVerseCardIndex + 1}/${totalCards}`
+                  : ''}
             </span>
             <span className="whitespace-nowrap shrink-0 flex items-center gap-1.5">
               <span>Bible</span>
@@ -1712,13 +2210,21 @@ export default function App() {
         onSelectChapter={handleSelectChapterFromDrawer}
       />
 
+      <SearchModal
+        isOpen={isSearchOpen}
+        translation={readingState.translation}
+        apiBibleKey={apiBibleKey}
+        onClose={() => setIsSearchOpen(false)}
+        onSelectResult={handleSelectSearchResult}
+      />
+
       <StatsModal
         isOpen={isStatsOpen}
         isSignedIn={Boolean(user)}
         streak={streakStats}
         readStats={readStats}
         onClose={() => setIsStatsOpen(false)}
-        onSelectBook={(book) => navigateToLocation(book.id, 1, 1)}
+        onSelectBook={(book) => navigateToLocation(book.id, 1, 1, { skipOverview: false })}
       />
 
       <BookmarksModal
@@ -1760,16 +2266,46 @@ export default function App() {
         onDelete={handleDeleteNote}
       />
 
+      <TranslationPickerModal
+        isOpen={isTranslationPickerOpen}
+        translation={readingState.translation}
+        apiBibleKey={apiBibleKey}
+        resolvedApiBibleIds={resolvedApiBibleIds}
+        onClose={() => setIsTranslationPickerOpen(false)}
+        onSelectTranslation={handleChangeTranslation}
+        onOpenApiKeySettings={(requestedTranslation) => {
+          setIsTranslationPickerOpen(false);
+          setSettingsFocusApiKey(true);
+          setSettingsMissingKeyFor(requestedTranslation ?? null);
+          setIsSettingsOpen(true);
+        }}
+      />
+
       <SettingsModal
         isOpen={isSettingsOpen}
         translation={readingState.translation}
         smartGrouping={readingState.smartGrouping}
+        textSize={readingState.textSize}
+        fontFamily={readingState.fontFamily}
+        redLetter={readingState.redLetter}
+        apiBibleKey={apiBibleKey}
+        resolvedApiBibleIds={resolvedApiBibleIds}
+        focusApiKeyOnOpen={settingsFocusApiKey}
+        initialMissingKeyFor={settingsMissingKeyFor}
         user={user}
         authLoading={authLoading}
         authError={authError}
-        onClose={() => setIsSettingsOpen(false)}
+        onClose={() => {
+          setIsSettingsOpen(false);
+          setSettingsFocusApiKey(false);
+          setSettingsMissingKeyFor(null);
+        }}
         onChangeTranslation={handleChangeTranslation}
         onToggleSmartGrouping={handleToggleSmartGrouping}
+        onChangeTextSize={handleChangeTextSize}
+        onChangeFontFamily={handleChangeFontFamily}
+        onToggleRedLetter={handleToggleRedLetter}
+        onSaveApiBibleKey={handleSaveApiBibleKey}
         onSignIn={handleGoogleSignIn}
         onSignOut={handleSignOut}
       />

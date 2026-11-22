@@ -15,7 +15,7 @@
         "translation": {
           "type": "string",
           "description": "Selected Bible translation code.",
-          "enum": ["BSB", "WEB"]
+          "enum": ["BSB", "WEB", "NLT", "NASB", "CEV"]
         },
         "bookId": {
           "type": "string",
@@ -56,6 +56,26 @@
           "minLength": 0,
           "maxLength": 10,
           "pattern": "^(|[0-9]{4}-[0-9]{2}-[0-9]{2})$"
+        },
+        "apiBibleKey": {
+          "type": "string",
+          "description": "User-provided private API.Bible key for NLT, NASB, and CEV translations.",
+          "minLength": 0,
+          "maxLength": 256
+        },
+        "textSize": {
+          "type": "string",
+          "description": "Preferred scripture text size scale.",
+          "enum": ["S", "M", "L", "XL"]
+        },
+        "fontFamily": {
+          "type": "string",
+          "description": "Preferred scripture typography family.",
+          "enum": ["serif", "sans"]
+        },
+        "redLetter": {
+          "type": "boolean",
+          "description": "Whether New Testament words spoken by Jesus are rendered in red-letter styling."
         },
         "createdAt": {
           "type": "string",
@@ -125,7 +145,7 @@
         "translation": {
           "type": "string",
           "description": "Source translation of the saved verse.",
-          "enum": ["BSB", "WEB"]
+          "enum": ["BSB", "WEB", "NLT", "NASB", "CEV"]
         },
         "createdAt": {
           "type": "string",
@@ -237,7 +257,7 @@
         "translation": {
           "type": "string",
           "description": "Source translation of the verse.",
-          "enum": ["BSB", "WEB"]
+          "enum": ["BSB", "WEB", "NLT", "NASB", "CEV"]
         },
         "noteKind": {
           "type": "string",

@@ -17,6 +17,9 @@ import { getBookById, makeVerseKey } from '../data/bibleBooks';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import type { TranslationCode, VerseCardItem, VerseItem } from './scriptureApi';
 
+export type TextSizeOption = 'S' | 'M' | 'L' | 'XL';
+export type FontFamilyOption = 'serif' | 'sans';
+
 export interface ReadingState {
   bookId: string;
   bookName: string;
@@ -24,6 +27,9 @@ export interface ReadingState {
   verse: number;
   translation: TranslationCode;
   smartGrouping: boolean;
+  textSize: TextSizeOption;
+  fontFamily: FontFamilyOption;
+  redLetter: boolean;
 }
 
 export interface StreakStats {
@@ -68,6 +74,9 @@ export const DEFAULT_READING_STATE: ReadingState = {
   verse: 1,
   translation: 'BSB',
   smartGrouping: true,
+  textSize: 'M',
+  fontFamily: 'serif',
+  redLetter: true,
 };
 
 export const DEFAULT_STREAK_STATS: StreakStats = {
@@ -83,10 +92,39 @@ const STORAGE_KEYS = {
   notes: 'biblescroll:notes:v1',
   readVerses: 'biblescroll:readVerses:v1',
   streak: 'biblescroll:streak:v1',
+  apiBibleKey: 'biblescroll:apiBibleKey:v1',
 };
 
 function sanitizeTranslation(value: unknown): TranslationCode {
-  return value === 'WEB' ? 'WEB' : 'BSB';
+  if (
+    value === 'BSB' ||
+    value === 'WEB' ||
+    value === 'NLT' ||
+    value === 'NASB' ||
+    value === 'CEV'
+  ) {
+    return value;
+  }
+  return 'BSB';
+}
+
+export function sanitizeApiBibleKey(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  return value.trim().slice(0, 256);
+}
+
+function sanitizeTextSize(value: unknown): TextSizeOption {
+  if (value === 'S' || value === 'M' || value === 'L' || value === 'XL') {
+    return value;
+  }
+  return 'M';
+}
+
+function sanitizeFontFamily(value: unknown): FontFamilyOption {
+  if (value === 'serif' || value === 'sans') {
+    return value;
+  }
+  return 'serif';
 }
 
 function sanitizeDateKey(value: unknown): string {
@@ -178,6 +216,9 @@ function clampReadingState(input: Partial<ReadingState> | null | undefined): Rea
     verse,
     translation: sanitizeTranslation(input?.translation),
     smartGrouping: typeof input?.smartGrouping === 'boolean' ? input.smartGrouping : true,
+    textSize: sanitizeTextSize(input?.textSize),
+    fontFamily: sanitizeFontFamily(input?.fontFamily),
+    redLetter: typeof input?.redLetter === 'boolean' ? input.redLetter : true,
   };
 }
 
@@ -195,6 +236,28 @@ export function saveGuestReadingState(state: ReadingState): void {
   try {
     const safe = clampReadingState(state);
     localStorage.setItem(STORAGE_KEYS.readingState, JSON.stringify(safe));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+export function loadGuestApiBibleKey(): string {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.apiBibleKey);
+    return sanitizeApiBibleKey(raw);
+  } catch {
+    return '';
+  }
+}
+
+export function saveGuestApiBibleKey(apiKey: string): void {
+  try {
+    const safe = sanitizeApiBibleKey(apiKey);
+    if (safe) {
+      localStorage.setItem(STORAGE_KEYS.apiBibleKey, safe);
+    } else {
+      localStorage.removeItem(STORAGE_KEYS.apiBibleKey);
+    }
   } catch {
     // Ignore storage quota errors
   }
@@ -469,23 +532,61 @@ function toFirestoreNoteCreatePayload(uid: string, record: VerseNoteRecord) {
 
 function extractCloudProfile(
   data: Record<string, unknown>,
-  fallbackSmartGrouping = true,
-): { state: ReadingState; streak: StreakStats; hasExplicitSmartGrouping: boolean } {
+  fallback: Pick<ReadingState, 'smartGrouping' | 'textSize' | 'fontFamily' | 'redLetter'> = {
+    smartGrouping: true,
+    textSize: 'M',
+    fontFamily: 'serif',
+    redLetter: true,
+  },
+): {
+  state: ReadingState;
+  streak: StreakStats;
+  hasExplicitSmartGrouping: boolean;
+  hasMissingDisplayPrefs: boolean;
+  apiBibleKey: string;
+  hasApiBibleKeyField: boolean;
+} {
   const hasExplicitSmartGrouping = typeof data.smartGrouping === 'boolean';
+  const hasExplicitTextSize =
+    data.textSize === 'S' ||
+    data.textSize === 'M' ||
+    data.textSize === 'L' ||
+    data.textSize === 'XL';
+  const hasExplicitFontFamily = data.fontFamily === 'serif' || data.fontFamily === 'sans';
+  const hasExplicitRedLetter = typeof data.redLetter === 'boolean';
+  const hasMissingDisplayPrefs =
+    !hasExplicitTextSize || !hasExplicitFontFamily || !hasExplicitRedLetter;
+
   const state = clampReadingState({
     bookId: data.bookId as string,
     bookName: data.bookName as string,
     chapter: data.chapter as number,
     verse: data.verse as number,
     translation: data.translation as TranslationCode,
-    smartGrouping: hasExplicitSmartGrouping ? (data.smartGrouping as boolean) : fallbackSmartGrouping,
+    smartGrouping: hasExplicitSmartGrouping
+      ? (data.smartGrouping as boolean)
+      : fallback.smartGrouping,
+    textSize: hasExplicitTextSize ? (data.textSize as TextSizeOption) : fallback.textSize,
+    fontFamily: hasExplicitFontFamily
+      ? (data.fontFamily as FontFamilyOption)
+      : fallback.fontFamily,
+    redLetter: hasExplicitRedLetter ? (data.redLetter as boolean) : fallback.redLetter,
   });
   const streak = clampStreakStats({
     currentStreak: data.currentStreak as number | undefined,
     longestStreak: data.longestStreak as number | undefined,
     lastReadDate: data.lastReadDate as string | undefined,
   });
-  return { state, streak, hasExplicitSmartGrouping };
+  const hasApiBibleKeyField = typeof data.apiBibleKey === 'string';
+  const apiBibleKey = sanitizeApiBibleKey(data.apiBibleKey);
+  return {
+    state,
+    streak,
+    hasExplicitSmartGrouping,
+    hasMissingDisplayPrefs,
+    apiBibleKey,
+    hasApiBibleKeyField,
+  };
 }
 
 function mergeStreakStats(cloud: StreakStats, guest: StreakStats): { merged: StreakStats; changed: boolean } {
@@ -528,19 +629,36 @@ export async function ensureCloudUserDoc(
   uid: string,
   fallbackState: ReadingState,
   fallbackStreak: StreakStats = DEFAULT_STREAK_STATS,
-): Promise<{ state: ReadingState; streak: StreakStats }> {
+  fallbackApiBibleKey = '',
+): Promise<{
+  state: ReadingState;
+  streak: StreakStats;
+  apiBibleKey: string;
+  hasMissingDisplayPrefs?: boolean;
+}> {
   const userPath = `users/${uid}`;
   const userRef = doc(db, 'users', uid);
 
   try {
     const snap = await getDoc(userRef);
     if (snap.exists()) {
-      const extracted = extractCloudProfile(snap.data(), fallbackState.smartGrouping);
-      return { state: extracted.state, streak: extracted.streak };
+      const extracted = extractCloudProfile(snap.data(), {
+        smartGrouping: fallbackState.smartGrouping,
+        textSize: fallbackState.textSize,
+        fontFamily: fallbackState.fontFamily,
+        redLetter: fallbackState.redLetter,
+      });
+      return {
+        state: extracted.state,
+        streak: extracted.streak,
+        apiBibleKey: extracted.apiBibleKey,
+        hasMissingDisplayPrefs: extracted.hasMissingDisplayPrefs,
+      };
     }
 
     const safe = clampReadingState(fallbackState);
     const safeStreak = clampStreakStats(fallbackStreak);
+    const safeApiKey = sanitizeApiBibleKey(fallbackApiBibleKey);
     await setDoc(userRef, {
       uid,
       translation: safe.translation,
@@ -549,13 +667,22 @@ export async function ensureCloudUserDoc(
       chapter: safe.chapter,
       verse: safe.verse,
       smartGrouping: safe.smartGrouping,
+      textSize: safe.textSize,
+      fontFamily: safe.fontFamily,
+      redLetter: safe.redLetter,
       currentStreak: safeStreak.currentStreak,
       longestStreak: safeStreak.longestStreak,
       lastReadDate: safeStreak.lastReadDate,
+      ...(safeApiKey ? { apiBibleKey: safeApiKey } : {}),
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
-    return { state: safe, streak: safeStreak };
+    return {
+      state: safe,
+      streak: safeStreak,
+      apiBibleKey: safeApiKey,
+      hasMissingDisplayPrefs: false,
+    };
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, userPath);
   }
@@ -577,6 +704,9 @@ export async function updateCloudReadingState(uid: string, state: ReadingState):
         chapter: safe.chapter,
         verse: safe.verse,
         smartGrouping: safe.smartGrouping,
+        textSize: safe.textSize,
+        fontFamily: safe.fontFamily,
+        redLetter: safe.redLetter,
         currentStreak: 0,
         longestStreak: 0,
         lastReadDate: '',
@@ -593,6 +723,9 @@ export async function updateCloudReadingState(uid: string, state: ReadingState):
       chapter: safe.chapter,
       verse: safe.verse,
       smartGrouping: safe.smartGrouping,
+      textSize: safe.textSize,
+      fontFamily: safe.fontFamily,
+      redLetter: safe.redLetter,
       updatedAt: serverTimestamp(),
     });
   } catch (error) {
@@ -615,6 +748,26 @@ export async function updateCloudStreak(
       currentStreak: safeStreak.currentStreak,
       longestStreak: safeStreak.longestStreak,
       lastReadDate: safeStreak.lastReadDate,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, userPath);
+  }
+}
+
+export async function updateCloudApiBibleKey(
+  uid: string,
+  apiBibleKey: string,
+  fallbackState: ReadingState,
+): Promise<void> {
+  const userPath = `users/${uid}`;
+  const userRef = doc(db, 'users', uid);
+  const safeKey = sanitizeApiBibleKey(apiBibleKey);
+
+  try {
+    await ensureCloudUserDoc(uid, fallbackState, DEFAULT_STREAK_STATS, safeKey);
+    await updateDoc(userRef, {
+      apiBibleKey: safeKey,
       updatedAt: serverTimestamp(),
     });
   } catch (error) {
@@ -676,12 +829,19 @@ export async function mergeGuestDataIntoFirestore(
   guestNotes: Record<string, VerseNoteRecord> = {},
   guestReadVerses: Record<string, boolean> = {},
   guestStreak: StreakStats = DEFAULT_STREAK_STATS,
-): Promise<{ state: ReadingState; streak: StreakStats }> {
-  const { state: cloudState, streak: cloudStreak } = await ensureCloudUserDoc(
-    uid,
-    guestState,
-    guestStreak,
-  );
+  guestApiBibleKey = '',
+): Promise<{ state: ReadingState; streak: StreakStats; apiBibleKey: string }> {
+  const cleanGuestKey = sanitizeApiBibleKey(guestApiBibleKey);
+  const {
+    state: cloudState,
+    streak: cloudStreak,
+    apiBibleKey: cloudApiBibleKey,
+    hasMissingDisplayPrefs,
+  } = await ensureCloudUserDoc(uid, guestState, guestStreak, cleanGuestKey);
+
+  if (hasMissingDisplayPrefs) {
+    await updateCloudReadingState(uid, cloudState);
+  }
 
   // Merge streak if guest has newer or longer streak
   const { merged: resolvedStreak, changed: streakChanged } = mergeStreakStats(
@@ -690,6 +850,12 @@ export async function mergeGuestDataIntoFirestore(
   );
   if (streakChanged) {
     await updateCloudStreak(uid, resolvedStreak, cloudState);
+  }
+
+  let resolvedApiBibleKey = cloudApiBibleKey;
+  if (!resolvedApiBibleKey && cleanGuestKey) {
+    await updateCloudApiBibleKey(uid, cleanGuestKey, cloudState);
+    resolvedApiBibleKey = cleanGuestKey;
   }
 
   const likesPath = `users/${uid}/likes`;
@@ -857,7 +1023,7 @@ export async function mergeGuestDataIntoFirestore(
     }
   }
 
-  return { state: cloudState, streak: resolvedStreak };
+  return { state: cloudState, streak: resolvedStreak, apiBibleKey: resolvedApiBibleKey };
 }
 
 export async function toggleCloudSavedRecord(
@@ -933,6 +1099,7 @@ export function subscribeUserCloudData(
   callbacks: {
     onReadingState: (state: ReadingState) => void;
     onStreak: (streak: StreakStats) => void;
+    onApiBibleKey?: (apiBibleKey: string) => void;
     onLikes: (likes: Record<string, SavedVerseRecord>) => void;
     onBookmarks: (bookmarks: Record<string, SavedVerseRecord>) => void;
     onNotes: (notes: Record<string, VerseNoteRecord>) => void;
@@ -953,6 +1120,9 @@ export function subscribeUserCloudData(
         const extracted = extractCloudProfile(snap.data());
         callbacks.onReadingState(extracted.state);
         callbacks.onStreak(extracted.streak);
+        if (extracted.hasApiBibleKeyField && callbacks.onApiBibleKey) {
+          callbacks.onApiBibleKey(extracted.apiBibleKey);
+        }
       }
     },
     (error) => {

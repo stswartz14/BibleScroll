@@ -4,16 +4,23 @@ import {
   Bookmark,
   Check,
   CheckCircle2,
+  ChevronDown,
   Copy,
   Heart,
   NotebookPen,
   Share2,
 } from 'lucide-react';
 import type { TranslationCode, VerseCardItem } from '../services/scriptureApi';
+import type { FontFamilyOption, TextSizeOption } from '../services/userStore';
+import { isRedLetterVerse, segmentRedLetterVerse } from '../data/redLetterVerses';
 
 interface VerseCardProps {
   card: VerseCardItem;
   cardIndex: number;
+  textSize: TextSizeOption;
+  fontFamily: FontFamilyOption;
+  redLetter: boolean;
+  prevCardLastVerseWasRedLetter?: boolean;
   isLiked: boolean;
   isBookmarked: boolean;
   hasNote: boolean;
@@ -26,6 +33,7 @@ interface VerseCardProps {
   onShare: (card: VerseCardItem) => void;
   onCopy: (card: VerseCardItem) => void;
   onNextChapter: () => void;
+  onOpenTranslationPicker: () => void;
   isCopied: boolean;
 }
 
@@ -45,27 +53,108 @@ const TRANSLATION_DETAILS: Record<
     description:
       'A modern public-domain English update of the American Standard Version (1901), freely shareable worldwide.',
   },
+  NLT: {
+    fullName: 'New Living Translation',
+    subtitle: 'API.Bible · Tyndale House Foundation',
+    description:
+      'A clear, natural thought-for-thought English translation designed for smooth, contemporary reading.',
+  },
+  NASB: {
+    fullName: 'New American Standard Bible (2020)',
+    subtitle: 'API.Bible · The Lockman Foundation',
+    description:
+      'A literal, word-for-word English translation renowned for close fidelity to the original biblical languages.',
+  },
+  CEV: {
+    fullName: 'Contemporary English Version',
+    subtitle: 'API.Bible · American Bible Society',
+    description:
+      'An accessible, plain-language English translation crafted for effortless clarity when read silently or aloud.',
+  },
 };
 
-function getVerseTypographyClass(text: string): string {
+// Static Tailwind typography matrix: [short, medium, long, veryLong]
+// Sans uses ~0.84x optical compensation for Plus Jakarta Sans's larger x-height vs Cormorant Garamond.
+const TYPOGRAPHY_CLASSES: Record<
+  FontFamilyOption,
+  Record<TextSizeOption, readonly [string, string, string, string]>
+> = {
+  serif: {
+    S: [
+      'text-[clamp(1.34rem,2.9vw,1.95rem)] leading-[1.48]',
+      'text-[clamp(1.16rem,2.4vw,1.62rem)] leading-[1.5]',
+      'text-[clamp(1.02rem,2.0vw,1.34rem)] leading-[1.52]',
+      'text-[clamp(0.94rem,1.75vw,1.16rem)] leading-[1.54]',
+    ],
+    M: [
+      'text-[clamp(1.62rem,3.5vw,2.35rem)] leading-[1.45]',
+      'text-[clamp(1.36rem,2.9vw,1.92rem)] leading-[1.48]',
+      'text-[clamp(1.18rem,2.4vw,1.55rem)] leading-[1.5]',
+      'text-[clamp(1.06rem,2vw,1.32rem)] leading-[1.52]',
+    ],
+    L: [
+      'text-[clamp(1.86rem,4.1vw,2.72rem)] leading-[1.42]',
+      'text-[clamp(1.56rem,3.4vw,2.22rem)] leading-[1.45]',
+      'text-[clamp(1.34rem,2.8vw,1.8rem)] leading-[1.48]',
+      'text-[clamp(1.2rem,2.35vw,1.52rem)] leading-[1.5]',
+    ],
+    XL: [
+      'text-[clamp(2.12rem,4.7vw,3.05rem)] leading-[1.38]',
+      'text-[clamp(1.78rem,3.9vw,2.52rem)] leading-[1.42]',
+      'text-[clamp(1.52rem,3.2vw,2.05rem)] leading-[1.45]',
+      'text-[clamp(1.36rem,2.7vw,1.74rem)] leading-[1.48]',
+    ],
+  },
+  sans: {
+    S: [
+      'text-[clamp(1.08rem,2.35vw,1.54rem)] leading-[1.55]',
+      'text-[clamp(0.96rem,2vw,1.32rem)] leading-[1.58]',
+      'text-[clamp(0.88rem,1.7vw,1.14rem)] leading-[1.6]',
+      'text-[clamp(0.82rem,1.5vw,1.02rem)] leading-[1.62]',
+    ],
+    M: [
+      'text-[clamp(1.28rem,2.8vw,1.86rem)] leading-[1.52]',
+      'text-[clamp(1.12rem,2.35vw,1.56rem)] leading-[1.55]',
+      'text-[clamp(1rem,2vw,1.3rem)] leading-[1.58]',
+      'text-[clamp(0.92rem,1.75vw,1.14rem)] leading-[1.6]',
+    ],
+    L: [
+      'text-[clamp(1.48rem,3.3vw,2.16rem)] leading-[1.48]',
+      'text-[clamp(1.28rem,2.75vw,1.8rem)] leading-[1.52]',
+      'text-[clamp(1.14rem,2.35vw,1.5rem)] leading-[1.55]',
+      'text-[clamp(1.04rem,2.05vw,1.32rem)] leading-[1.58]',
+    ],
+    XL: [
+      'text-[clamp(1.68rem,3.8vw,2.46rem)] leading-[1.45]',
+      'text-[clamp(1.46rem,3.15vw,2.04rem)] leading-[1.48]',
+      'text-[clamp(1.28rem,2.65vw,1.72rem)] leading-[1.52]',
+      'text-[clamp(1.16rem,2.35vw,1.5rem)] leading-[1.55]',
+    ],
+  },
+};
+
+function getVerseTypographyClass(
+  text: string,
+  textSize: TextSizeOption,
+  fontFamily: FontFamilyOption,
+): string {
   const len = text.length;
   const lineCount = text.split('\n').length;
+  const scale = TYPOGRAPHY_CLASSES[fontFamily][textSize];
 
-  if (len > 420 || lineCount > 9) {
-    return 'text-[clamp(1.06rem,2vw,1.32rem)] leading-[1.52]';
-  }
-  if (len > 270 || lineCount > 6) {
-    return 'text-[clamp(1.18rem,2.4vw,1.55rem)] leading-[1.5]';
-  }
-  if (len > 150 || lineCount > 4) {
-    return 'text-[clamp(1.36rem,2.9vw,1.92rem)] leading-[1.48]';
-  }
-  return 'text-[clamp(1.62rem,3.5vw,2.35rem)] leading-[1.45]';
+  if (len > 420 || lineCount > 9) return scale[3];
+  if (len > 270 || lineCount > 6) return scale[2];
+  if (len > 150 || lineCount > 4) return scale[1];
+  return scale[0];
 }
 
 export function VerseCard({
   card,
   cardIndex,
+  textSize,
+  fontFamily,
+  redLetter,
+  prevCardLastVerseWasRedLetter = false,
   isLiked,
   isBookmarked,
   hasNote,
@@ -78,10 +167,10 @@ export function VerseCard({
   onShare,
   onCopy,
   onNextChapter,
+  onOpenTranslationPicker,
   isCopied,
 }: VerseCardProps) {
   const textBoxRef = useRef<HTMLDivElement | null>(null);
-  const pointerDownTimeRef = useRef<number>(0);
   const [hasOverflow, setHasOverflow] = useState(false);
   const [isAtBottom, setIsAtBottom] = useState(false);
   const [showTranslationInfo, setShowTranslationInfo] = useState(false);
@@ -99,6 +188,7 @@ export function VerseCard({
     };
 
     checkScroll();
+    const rafId = requestAnimationFrame(checkScroll);
     window.addEventListener('resize', checkScroll);
     if (document.fonts?.ready) {
       void document.fonts.ready.then(checkScroll);
@@ -106,9 +196,10 @@ export function VerseCard({
 
     return () => {
       cancelled = true;
+      cancelAnimationFrame(rafId);
       window.removeEventListener('resize', checkScroll);
     };
-  }, [card.combinedText]);
+  }, [card.combinedText, textSize, fontFamily]);
 
   const handleInnerScroll = () => {
     const el = textBoxRef.current;
@@ -116,7 +207,11 @@ export function VerseCard({
     setIsAtBottom(el.scrollTop + el.clientHeight >= el.scrollHeight - 8);
   };
 
-  const typographyClass = getVerseTypographyClass(card.combinedText);
+  const typographyClass = getVerseTypographyClass(card.combinedText, textSize, fontFamily);
+  const fontClass =
+    fontFamily === 'sans'
+      ? 'font-ui font-normal tracking-[-0.005em]'
+      : 'font-scripture font-normal tracking-[0.01em]';
   const translationInfo = TRANSLATION_DETAILS[card.translation];
 
   return (
@@ -149,20 +244,44 @@ export function VerseCard({
             hasOverflow ? 'overflow-y-auto overscroll-y-auto pr-1' : 'overflow-hidden'
           }`}
         >
-          <p
-            className={`font-scripture font-normal tracking-[0.01em] text-[#F5F2EA] whitespace-pre-line ${typographyClass}`}
-          >
+          <p className={`${fontClass} text-[#F5F2EA] whitespace-pre-line ${typographyClass}`}>
             {card.verses.map((v, idx) => {
-              const prevText = idx > 0 ? card.verses[idx - 1].text : '';
+              const prevVerse = idx > 0 ? card.verses[idx - 1] : null;
+              const prevText = prevVerse ? prevVerse.text : '';
               const sep =
                 idx === 0 ? '' : prevText.includes('\n') || v.text.includes('\n') ? '\n' : ' ';
+              const prevWasRedLetter =
+                idx === 0
+                  ? prevCardLastVerseWasRedLetter
+                  : prevVerse !== null &&
+                    isRedLetterVerse(prevVerse.bookId, prevVerse.chapter, prevVerse.verse);
+              const segments = redLetter
+                ? segmentRedLetterVerse({
+                    bookId: v.bookId,
+                    chapter: v.chapter,
+                    verse: v.verse,
+                    text: v.text,
+                    prevVerseWasRedLetter: prevWasRedLetter,
+                  })
+                : null;
+
               return (
                 <Fragment key={v.verse}>
                   {sep}
                   <sup className="font-ui text-[0.46em] font-semibold text-[#D4AF37] mr-1.5 align-super tabular-nums select-none">
                     {v.verse}
                   </sup>
-                  {v.text}
+                  {segments
+                    ? segments.map((seg, segIdx) =>
+                        seg.isRedLetter ? (
+                          <span key={segIdx} className="text-[#E06C65]">
+                            {seg.text}
+                          </span>
+                        ) : (
+                          <Fragment key={segIdx}>{seg.text}</Fragment>
+                        ),
+                      )
+                    : v.text}
                 </Fragment>
               );
             })}
@@ -202,36 +321,26 @@ export function VerseCard({
 
             <button
               type="button"
+              onClick={() => {
+                setShowTranslationInfo(false);
+                onOpenTranslationPicker();
+              }}
               onMouseEnter={() => setShowTranslationInfo(true)}
               onMouseLeave={() => setShowTranslationInfo(false)}
               onFocus={() => setShowTranslationInfo(true)}
               onBlur={() => setShowTranslationInfo(false)}
-              onPointerDown={(e) => {
-                if (e.pointerType !== 'mouse') {
-                  pointerDownTimeRef.current = Date.now();
-                  setShowTranslationInfo(true);
-                }
-              }}
-              onPointerUp={(e) => {
-                if (e.pointerType !== 'mouse') {
-                  const heldMs = Date.now() - pointerDownTimeRef.current;
-                  if (heldMs >= 220) {
-                    setShowTranslationInfo(false);
-                  }
-                }
-              }}
-              onPointerCancel={() => setShowTranslationInfo(false)}
-              onContextMenu={(e) => e.preventDefault()}
-              aria-label={`${card.translation}: ${translationInfo.fullName}. Hold or hover for translation details.`}
-              className="relative inline-flex items-center px-1.5 py-0.5 -mx-1.5 -my-0.5 rounded-md text-[#D4AF37] font-semibold hover:bg-[#D4AF37]/10 focus-visible:outline focus-visible:outline-1 focus-visible:outline-[#D4AF37] select-none touch-manipulation transition-colors"
+              aria-label={`Current translation ${card.translation}: ${translationInfo.fullName}. Click to change translation.`}
+              aria-haspopup="dialog"
+              className="relative inline-flex items-center gap-1 min-h-[44px] px-2 -mx-1.5 -my-2.5 rounded-lg text-[#D4AF37] font-semibold hover:bg-[#D4AF37]/12 active:scale-[0.97] focus-visible:outline focus-visible:outline-1 focus-visible:outline-[#D4AF37] select-none touch-manipulation transition-colors whitespace-nowrap"
             >
-              {card.translation}
+              <span>{card.translation}</span>
+              <ChevronDown className="w-3.5 h-3.5 opacity-80" aria-hidden="true" />
             </button>
 
             {showTranslationInfo && (
               <div
                 role="tooltip"
-                className="pointer-events-none absolute bottom-full left-0 mb-2.5 w-64 sm:w-72 rounded-xl bg-[#161B19]/95 backdrop-blur-md border border-[#D4AF37]/45 p-3.5 shadow-[0_12px_32px_rgba(0,0,0,0.55)] z-30"
+                className="pointer-events-none hidden sm:block absolute bottom-full left-0 mb-2.5 w-64 sm:w-72 rounded-xl bg-[#161B19]/95 backdrop-blur-md border border-[#D4AF37]/45 p-3.5 shadow-[0_12px_32px_rgba(0,0,0,0.55)] z-30"
               >
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-xs font-semibold text-[#F5F2EA]">
@@ -246,6 +355,9 @@ export function VerseCard({
                 </p>
                 <p className="text-[11px] text-[#9CA8A2] leading-relaxed mt-1.5">
                   {translationInfo.description}
+                </p>
+                <p className="text-[11px] font-medium text-[#D4AF37]/90 mt-2">
+                  Click to switch translation
                 </p>
               </div>
             )}

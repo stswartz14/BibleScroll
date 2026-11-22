@@ -39,7 +39,15 @@ service cloud.firestore {
     }
 
     function isValidTranslation(t) {
-      return t is string && (t == 'BSB' || t == 'WEB');
+      return t is string && (t == 'BSB' || t == 'WEB' || t == 'NLT' || t == 'NASB' || t == 'CEV');
+    }
+
+    function isValidTextSize(s) {
+      return s is string && (s == 'S' || s == 'M' || s == 'L' || s == 'XL');
+    }
+
+    function isValidFontFamily(f) {
+      return f is string && (f == 'serif' || f == 'sans');
     }
 
     function isValidUserReadingState(data, userId) {
@@ -55,6 +63,10 @@ service cloud.firestore {
           'currentStreak',
           'longestStreak',
           'lastReadDate',
+          'apiBibleKey',
+          'textSize',
+          'fontFamily',
+          'redLetter',
           'createdAt',
           'updatedAt'
         ])
@@ -75,6 +87,10 @@ service cloud.firestore {
         && (!('currentStreak' in data) || (data.currentStreak is int && data.currentStreak >= 0 && data.currentStreak <= 50000))
         && (!('longestStreak' in data) || (data.longestStreak is int && data.longestStreak >= 0 && data.longestStreak <= 50000))
         && (!('lastReadDate' in data) || (data.lastReadDate is string && data.lastReadDate.size() <= 10 && (data.lastReadDate == '' || data.lastReadDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$'))))
+        && (!('apiBibleKey' in data) || (data.apiBibleKey is string && data.apiBibleKey.size() <= 256))
+        && (!('textSize' in data) || isValidTextSize(data.textSize))
+        && (!('fontFamily' in data) || isValidFontFamily(data.fontFamily))
+        && (!('redLetter' in data) || data.redLetter is bool)
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -215,6 +231,10 @@ service cloud.firestore {
           'currentStreak',
           'longestStreak',
           'lastReadDate',
+          'apiBibleKey',
+          'textSize',
+          'fontFamily',
+          'redLetter',
           'updatedAt'
         ]);
       allow delete: if isOwner(userId);

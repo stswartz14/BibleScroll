@@ -1,4 +1,5 @@
 import { BIBLE_BOOKS, type Testament } from './bibleBooks';
+import type { TranslationCode } from '../services/scriptureApi';
 
 // Canonical 1,189-chapter verse counts across all 66 books (summing to 31,102 verses: 23,145 OT + 7,957 NT).
 export const CHAPTER_VERSE_COUNTS: Record<string, number[]> = {
@@ -112,7 +113,7 @@ export function getBookTotalVerses(bookId: string): number {
 export function getChapterTotalVerses(
   bookId: string,
   chapter: number,
-  translation: 'BSB' | 'WEB' = 'BSB',
+  translation: TranslationCode = 'BSB',
 ): number {
   if (translation === 'BSB') {
     const override = BSB_CHAPTER_VERSE_OVERRIDES[`${bookId}-${chapter}`];
@@ -151,7 +152,7 @@ export interface BibleReadStats {
 
 export function computeBibleReadStats(
   readVersesMap: Record<string, boolean>,
-  translation: 'BSB' | 'WEB' = 'BSB',
+  translation: TranslationCode = 'BSB',
 ): BibleReadStats {
   const perBookChapterSets = new Map<string, Map<number, Set<number>>>();
   const perBookVerseSets = new Map<string, Set<string>>();
